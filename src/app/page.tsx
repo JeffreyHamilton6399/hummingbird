@@ -9,6 +9,7 @@ import {
   Lock,
   AudioLines,
   MicOff,
+  Music4,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { HummingbirdLogo } from "@/components/hummingbird-logo";
@@ -17,7 +18,7 @@ import { LoadingDots } from "@/components/loading-dots";
 import { ResultCard } from "@/components/result-card";
 import { SettingsMenu } from "@/components/settings-menu";
 import { TermsGate } from "@/components/terms-gate";
-import { useSpeechRecognition } from "@/lib/speech";
+import { useHummingCapture, type MelodyContour } from "@/lib/audio-capture";
 import type { SongResult } from "@/lib/types";
 
 type AppState = "idle" | "listening" | "thinking" | "result" | "error";
@@ -26,72 +27,95 @@ export default function Home() {
   const [state, setState] = React.useState<AppState>("idle");
   const [result, setResult] = React.useState<SongResult | null>(null);
   const [errorMsg, setErrorMsg] = React.useState("");
-  const [submittedText, setSubmittedText] = React.useState("");
+  const [submittedLabel, setSubmittedLabel] = React.useState("");
 
-  const identify = React.useCallback(async (description: string) => {
-    const clean = description.trim();
-    if (!clean) {
-      // Nothing was captured — guide the user instead of silently failing.
-      setErrorMsg(
-        "I didn't catch any words. Tap the mic and sing the lyrics, or describe the song out loud — humming alone doesn't give me words to search."
-      );
-      setState("error");
-      return;
-    }
-    setSubmittedText(clean.length > 140 ? clean.slice(0, 140) + "…" : clean);
-    setState("thinking");
-    setResult(null);
-    setErrorMsg("");
-    try {
-      const res = await fetch("/api/identify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ description: clean }),
-      });
-      const data = (await res.json()) as SongResult;
-      if (data.error) {
+  const identify = React.useCallback(
+    async (transcript: string, melody: MelodyContour | null) => {
+      const words = transcript.trim();
+      const melodyDesc = melody?.description ?? "";
+
+      if (!words && !melodyDesc) {
         setErrorMsg(
-          data.suggestion ||
-            "Try singing the lyrics, or mention the genre, decade, or the singer's voice."
+          "I didn't catch any words or melody. Sing the lyrics out loud, or hum the tune clearly — make sure your mic is on and you're in a quiet spot."
         );
         setState("error");
         return;
       }
-      setResult(data);
-      setState("result");
-    } catch {
-      setErrorMsg("Network hiccup — please try again in a moment.");
-      setState("error");
-    }
-  }, []);
 
-  const handleVoiceEnd = React.useCallback(
-    (finalTranscript: string) => {
-      identify(finalTranscript);
+      // Build a short label for the thinking state.
+      if (words && melodyDesc) {
+        setSubmittedLabel(
+          `“${words.length > 80 ? words.slice(0, 80) + "…" : words}” + hummed melody`
+        );
+      } else if (words) {
+        setSubmittedLabel(
+          `“${words.length > 100 ? words.slice(0, 100) + "…" : words}”`
+        );
+      } else {
+        setSubmittedLabel(`Hummed melody: ${melody?.shape ?? "melody"}`);
+      }
+
+      setState("thinking");
+      setResult(null);
+      setErrorMsg("");
+
+      try {
+        const body: Record<string, string> = {};
+        if (words) body.description = words;
+        if (melodyDesc) body.melody = melodyDesc;
+
+        const res = await fetch("/api/identify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = (await res.json()) as SongResult;
+        if (data.error) {
+          setErrorMsg(
+            data.suggestion ||
+              "Try singing the lyrics, or mention the genre, decade, or the singer's voice."
+          );
+          setState("error");
+          return;
+        }
+        setResult(data);
+        setState("result");
+      } catch {
+        setErrorMsg("Network hiccup — please try again in a moment.");
+        setState("error");
+      }
+    },
+    []
+  );
+
+  const handleCaptureEnd = React.useCallback(
+    (captured: { transcript: string; melody: MelodyContour | null }) => {
+      identify(captured.transcript, captured.melody);
     },
     [identify]
   );
 
-  const handleVoiceError = React.useCallback((error: string) => {
+  const handleCaptureError = React.useCallback((error: string) => {
     setState("idle");
-    if (error === "not-allowed" || error === "service-not-allowed") {
+    if (error === "not-allowed" || error === "service-not-allowed" || error === "mic-denied") {
       toast.error("Microphone access was blocked. Allow mic permission and try again.");
-    } else if (error !== "no-speech" && error !== "aborted") {
-      toast.error("Voice input hit a snag. Try again.");
+    } else if (error === "unsupported") {
+      toast.error("Voice input isn't supported in this browser. Try Chrome, Edge, or Safari.");
     }
   }, []);
 
-  const { supported, listening, transcript, start, stop } = useSpeechRecognition({
-    onEnd: handleVoiceEnd,
-    onError: handleVoiceError,
-  });
+  const { supported, listening, transcript, level, hasMelody, start, stop } =
+    useHummingCapture({
+      onEnd: handleCaptureEnd,
+      onError: handleCaptureError,
+    });
 
   const toggleMic = React.useCallback(() => {
     if (listening) {
       stop();
     } else {
       setState("listening");
-      start();
+      void start();
     }
   }, [listening, start, stop]);
 
@@ -99,7 +123,7 @@ export default function Home() {
     setState("idle");
     setResult(null);
     setErrorMsg("");
-    setSubmittedText("");
+    setSubmittedLabel("");
   }, []);
 
   return (
@@ -138,11 +162,16 @@ export default function Home() {
           )}
 
           {state === "listening" && (
-            <ListeningState transcript={transcript} onStop={toggleMic} />
+            <ListeningState
+              transcript={transcript}
+              level={level}
+              hasMelody={hasMelody}
+              onStop={toggleMic}
+            />
           )}
 
           {state === "thinking" && (
-            <ThinkingState submittedText={submittedText} />
+            <ThinkingState submittedLabel={submittedLabel} />
           )}
 
           {state === "result" && result && (
@@ -183,8 +212,8 @@ function IdleState({
       {micSupported ? (
         <>
           <MicButton listening={false} onToggle={onToggleMic} />
-          <p className="text-xs text-muted-foreground -mt-2">
-            Tap to hum, sing, or say the lyrics
+          <p className="text-xs text-muted-foreground -mt-2 text-center">
+            Tap to hum the tune or sing the lyrics
           </p>
         </>
       ) : (
@@ -201,8 +230,8 @@ function IdleState({
 
       <p className="flex items-center gap-1 text-[11px] text-muted-foreground/70 max-w-xs text-center">
         <Lock className="size-3 shrink-0" />
-        Your voice is transcribed on your device. Only the words are sent to our
-        AI. We don&apos;t store them.
+        Your voice is transcribed on your device. Only the words and melody
+        shape are sent to our AI. We don&apos;t store them.
       </p>
     </div>
   );
@@ -212,24 +241,39 @@ function IdleState({
 
 function ListeningState({
   transcript,
+  level,
+  hasMelody,
   onStop,
 }: {
   transcript: string;
+  level: number;
+  hasMelody: boolean;
   onStop: () => void;
 }) {
+  // Bars react to live input level; CSS animation adds liveliness on top.
+  const bars = [0, 1, 2, 3, 4, 5, 6];
   return (
     <div className="w-full flex flex-col items-center gap-5 animate-hum-fade-in">
       <MicButton listening onToggle={onStop} />
 
-      {/* Waveform */}
+      {/* Live waveform — reacts to actual mic input */}
       <div className="flex items-end gap-1 h-6" aria-hidden>
-        {[0, 1, 2, 3, 4, 5, 6].map((i) => (
-          <span
-            key={i}
-            className="w-1 rounded-full bg-red-500 animate-hum-bar"
-            style={{ height: "100%", animationDelay: `${i * 0.1}s` }}
-          />
-        ))}
+        {bars.map((i) => {
+          const base = 0.25 + level * 0.75;
+          const variance = 0.4 + 0.6 * Math.sin(i * 1.3);
+          const h = Math.max(0.15, Math.min(1, base * variance));
+          return (
+            <span
+              key={i}
+              className="w-1 rounded-full bg-red-500 animate-hum-bar"
+              style={{
+                height: `${h * 100}%`,
+                animationDelay: `${i * 0.1}s`,
+                opacity: 0.5 + level * 0.5,
+              }}
+            />
+          );
+        })}
       </div>
 
       <p className="text-sm text-muted-foreground flex items-center gap-1.5">
@@ -237,13 +281,29 @@ function ListeningState({
         Listening… tap again to send
       </p>
 
-      {/* Live transcript */}
+      {/* Status indicators */}
+      <div className="flex items-center gap-3 text-xs">
+        {transcript ? (
+          <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+            <AudioLines className="size-3" /> words captured
+          </span>
+        ) : (
+          <span className="text-muted-foreground/60">no words yet</span>
+        )}
+        {hasMelody && (
+          <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+            <Music4 className="size-3" /> melody detected
+          </span>
+        )}
+      </div>
+
+      {/* Live transcript / hint */}
       <div className="w-full max-w-sm min-h-[3.5rem] rounded-lg border bg-muted/40 p-3">
         {transcript ? (
           <p className="text-sm leading-relaxed">{transcript}</p>
         ) : (
           <p className="text-sm text-muted-foreground italic">
-            Sing the lyrics, or describe the song out loud…
+            Sing the lyrics, or hum the tune…
           </p>
         )}
       </div>
@@ -257,19 +317,18 @@ function ListeningState({
 
 /* ---------------- Thinking ---------------- */
 
-function ThinkingState({ submittedText }: { submittedText: string }) {
+function ThinkingState({ submittedLabel }: { submittedLabel: string }) {
   return (
     <div className="w-full flex flex-col items-center gap-5 animate-hum-fade-in">
       <LoadingDots label="Searching for your song" />
-      {submittedText && (
+      {submittedLabel && (
         <p className="max-w-sm text-center text-xs text-muted-foreground/80">
-          <span className="text-foreground/70">
-            &ldquo;{submittedText}&rdquo;
-          </span>
+          <span className="text-foreground/70">{submittedLabel}</span>
         </p>
       )}
       <p className="text-[11px] text-muted-foreground/60">
-        Searching the web + reasoning over lyrics… this can take a few seconds.
+        Searching the web + reasoning over lyrics &amp; melody… this can take a
+        few seconds.
       </p>
     </div>
   );
