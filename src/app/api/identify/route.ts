@@ -4,6 +4,7 @@ import type { SongResult } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 interface SearchResultItem {
   name?: string;
@@ -22,10 +23,10 @@ function compactSearchResults(results: unknown): string {
   const items = results as SearchResultItem[];
   if (items.length === 0) return "";
   return items
-    .slice(0, 8)
+    .slice(0, 6)
     .map((item, i) => {
       const title = truncate(item.name || "", 120);
-      const snippet = truncate(item.snippet || "", 280);
+      const snippet = truncate(item.snippet || "", 200);
       return `[${i + 1}] ${title}\n${snippet}`;
     })
     .join("\n\n");
@@ -48,43 +49,95 @@ function extractJson(content: string): unknown {
   return JSON.parse(text);
 }
 
-const SYSTEM_PROMPT = `You are "Hummingbird", a music identification expert. A user hummed, sang, or spoke about a song. You receive up to two inputs:
+/**
+ * Parse search results server-side to extract a best-guess song, even when
+ * the LLM is unavailable. Looks for "Title - Artist" or "Title by Artist"
+ * patterns in result titles/snippets.
+ */
+function parseSongFromSearch(
+  results: SearchResultItem[],
+  description: string
+): SongResult | null {
+  if (results.length === 0) return null;
 
-1. SPOKEN WORDS (PRIMARY signal) — a transcript of sung lyrics or a spoken description. This is the MOST RELIABLE signal. If present, lean on it heavily: search for the lyrics, quote them, and match.
-2. HUMMED MELODY (secondary, approximate) — a description of the melody's CONTOUR as a direction sequence (up / down / same) and coarse step sizes.
+  // Common patterns: "Song Title - Artist", "Song Title by Artist", "Artist – Song Title Lyrics"
+  const patterns = [
+    /^(.+?)\s+[-–—]\s+(.+?)(?:\s+lyrics|\s+official|\s+video|\s*\|.*|$)$/i,
+    /^(.+?)\s+by\s+(.+?)(?:\s*\|.*|$)$/i,
+    /^(.+?)\s+[-–—]\s+(.+?)\s+lyrics/i,
+  ];
 
-CRITICAL — the user may be a POOR singer:
-- They will NOT sing in the original key. Never match by absolute pitch or exact semitones.
-- Their exact intervals may be wrong. Do NOT compare semitone numbers to the original song.
-- DO match the melody by its CONTOUR SHAPE — the sequence of ups, downs, and sames — which even a bad singer conveys. Famous melodies have distinctive contour shapes (e.g. "Twinkle Twinkle" = same-same-up-same-same; "Happy Birthday" = up-up-up-a-lot-same-down; "Somewhere Over the Rainbow" opens with a big upward leap).
-- Combine both signals when both are present. If lyrics are present, they dominate; the melody is a confirming hint. If only the melody is present, match famous melodies by contour shape and be honest about lower confidence.
+  const candidates: Array<{ title: string; artist: string; source: string }> =
+    [];
 
-Return ONLY a JSON object (no markdown, no prose) with this exact shape:
-{
-  "title": string,
-  "artist": string,
-  "year": number | undefined,
-  "confidence": number,
-  "why": string,
-  "lyrics_snippet": string | undefined,
-  "alternatives": [
-    { "title": string, "artist": string, "year": number | undefined, "confidence": number }
-  ]
+  for (const r of results.slice(0, 6)) {
+    const title = (r.name || "").trim();
+    const snippet = (r.snippet || "").trim();
+    for (const pat of patterns) {
+      const m = title.match(pat);
+      if (m && m[1] && m[2]) {
+        // Filter out obvious non-song results (pure domain names, etc.)
+        if (
+          m[1].length > 1 &&
+          m[2].length > 1 &&
+          !m[1].includes(".") &&
+          !m[2].includes(".")
+        ) {
+          candidates.push({
+            title: m[1].trim(),
+            artist: m[2].trim(),
+            source: title,
+          });
+        }
+      }
+    }
+    // Also try the snippet
+    const sm = snippet.match(patterns[0]);
+    if (sm && sm[1] && sm[2] && candidates.length < 3) {
+      candidates.push({
+        title: sm[1].trim(),
+        artist: sm[2].trim(),
+        source: snippet.slice(0, 60),
+      });
+    }
+  }
+
+  if (candidates.length === 0) return null;
+
+  const top = candidates[0];
+  const alternatives = candidates.slice(1, 4).map((c, i) => ({
+    title: c.title,
+    artist: c.artist,
+    confidence: 30 - i * 8,
+  }));
+
+  return {
+    title: top.title,
+    artist: top.artist,
+    confidence: 45,
+    why: `Based on web search results for "${description.slice(0, 60)}", this looks like the closest match. (AI reasoning was unavailable, so confidence is lower — verify via the links.)`,
+    alternatives,
+  };
 }
 
-Rules:
-- If you are fairly sure (>= 70), still include 1-2 alternatives.
-- If you are not sure, return your best guess with a lower confidence and 3-5 alternatives.
-- If you truly cannot identify it, return: { "error": true, "suggestion": "Try singing some of the lyrics out loud — even a few words helps a lot." }
-- Never invent fake lyrics. If unsure of the exact snippet, omit lyrics_snippet.
-- Keep "why" concise and human.`;
+const SYSTEM_PROMPT = `You are "Hummingbird", a music identification expert. A user hummed, sang, or spoke about a song.
+
+Inputs you may receive:
+- SPOKEN WORDS: sung lyrics or a description (PRIMARY signal — lean on it heavily).
+- HUMMED MELODY: an approximate contour (direction sequence: up/down/same + coarse step sizes). The user may be a POOR singer — never match by absolute pitch or exact semitones. Match by contour SHAPE only.
+- Web search results.
+
+If lyrics are present, they dominate. Return ONLY a JSON object (no markdown):
+{"title":string,"artist":string,"year":number|undefined,"confidence":0-100,"why":string,"lyrics_snippet":string|undefined,"alternatives":[{"title":string,"artist":string,"year":number|undefined,"confidence":number}]}
+
+If unsure, lower confidence and add 3-5 alternatives. If truly unknown: {"error":true,"suggestion":"Try singing some lyrics out loud."} Never invent lyrics.`;
 
 async function callLLM(
   zai: Awaited<ReturnType<typeof ZAI.create>>,
   userContent: string
 ): Promise<string> {
   let lastErr: unknown;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 5; attempt++) {
     try {
       const completion = await zai.chat.completions.create({
         messages: [
@@ -96,11 +149,11 @@ async function callLLM(
       if (content) return content;
     } catch (err) {
       lastErr = err;
-      // Brief backoff before retry.
-      await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+      // Exponential backoff: 1s, 2s, 4s, 8s, 16s
+      await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt)));
     }
   }
-  console.error("[/api/identify] LLM failed after retries:", lastErr);
+  console.error("[/api/identify] LLM failed after 5 retries:", lastErr);
   throw lastErr instanceof Error ? lastErr : new Error("LLM unavailable");
 }
 
@@ -124,43 +177,47 @@ export async function POST(req: Request) {
       {
         error: true,
         suggestion:
-          "I didn't catch any words or melody. Sing the lyrics out loud, or hum the tune clearly — make sure your mic is on and you're in a quiet spot.",
+          "I didn't catch any words or melody. Sing the lyrics out loud, or hum the tune clearly — make sure your mic is on.",
       },
       { status: 400 }
     );
   }
 
-  if (description.length > 1000) description = description.slice(0, 1000);
-  if (melody.length > 1000) melody = melody.slice(0, 1000);
+  if (description.length > 800) description = description.slice(0, 800);
+  if (melody.length > 800) melody = melody.slice(0, 800);
 
-  let searchContext = "";
   let searchResults: SearchResultItem[] = [];
+  let searchContext = "";
 
   try {
     const zai = await ZAI.create();
 
-    // Step 1: web search (best-effort).
-    try {
-      let searchQuery: string;
-      if (description) {
-        searchQuery = `song lyrics "${description.slice(0, 120)}" artist`;
-      } else {
-        const shapeMatch = melody.match(/shape: ([^.]+)\./i);
-        const shape = shapeMatch?.[1] || "melody";
-        searchQuery = `famous song ${shape} melody identify`;
+    // Step 1: web search (best-effort, with retry).
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        let searchQuery: string;
+        if (description) {
+          searchQuery = `song lyrics "${description.slice(0, 100)}" artist`;
+        } else {
+          searchQuery = `famous song melody identify`;
+        }
+        const raw = await zai.functions.invoke("web_search", {
+          query: searchQuery,
+          num: 6,
+        });
+        if (Array.isArray(raw)) {
+          searchResults = raw as SearchResultItem[];
+          searchContext = compactSearchResults(raw);
+        }
+        break;
+      } catch (err) {
+        if (attempt === 0) {
+          await new Promise((r) => setTimeout(r, 1000));
+        }
       }
-      const raw = await zai.functions.invoke("web_search", {
-        query: searchQuery,
-        num: 8,
-      });
-      if (Array.isArray(raw)) searchResults = raw as SearchResultItem[];
-      searchContext = compactSearchResults(raw);
-    } catch {
-      // Search is best-effort; the LLM can still reason from the description.
-      searchContext = "";
     }
 
-    // Step 2: ask the LLM to identify the song (with retries).
+    // Step 2: ask the LLM (with 5 retries + exponential backoff).
     const parts: string[] = [];
     if (description) parts.push(`Spoken words: "${description}"`);
     if (melody) parts.push(`Hummed melody: ${melody}`);
@@ -171,28 +228,23 @@ export async function POST(req: Request) {
     try {
       const content = await callLLM(zai, userContent);
       parsed = extractJson(content) as SongResult;
-    } catch (llmErr) {
-      // LLM completely failed — fall back to raw search results so the user
-      // gets *something* useful instead of a blank error.
-      console.error("[/api/identify] LLM unavailable, returning search fallback");
-      if (searchResults.length > 0) {
-        const top = searchResults.slice(0, 4).map((r, i) => ({
-          title: r.name || "Unknown",
-          artist: r.host_name || "",
-          confidence: 40 - i * 10,
-        }));
-        return NextResponse.json({
-          title: top[0].title,
-          artist: top[0].artist,
-          confidence: 30,
-          why: "The AI reasoning service was unavailable, but here are the top web search results for your description.",
-          alternatives: top.slice(1),
-        } satisfies SongResult);
+    } catch {
+      // LLM completely failed after all retries — parse search results
+      // server-side as a strong fallback.
+      console.error("[/api/identify] LLM unavailable, parsing search results");
+      const fallback = parseSongFromSearch(searchResults, description);
+      if (fallback) {
+        return NextResponse.json(fallback);
       }
-      throw llmErr;
+      // No search results either — return a graceful error.
+      return NextResponse.json({
+        error: true,
+        suggestion:
+          "The AI service is having trouble right now. Please try again in a moment — sing the lyrics or hum the tune.",
+      });
     }
 
-    // Sanity-check the shape.
+    // Sanity-check the LLM response shape.
     if (parsed && typeof parsed === "object") {
       if (parsed.error === true) {
         return NextResponse.json(parsed);
@@ -203,6 +255,10 @@ export async function POST(req: Request) {
       }
     }
 
+    // LLM returned unparseable JSON — try search fallback before erroring.
+    const fallback = parseSongFromSearch(searchResults, description);
+    if (fallback) return NextResponse.json(fallback);
+
     return NextResponse.json({
       error: true,
       suggestion:
@@ -210,11 +266,14 @@ export async function POST(req: Request) {
     });
   } catch (err) {
     console.error("[/api/identify] fatal error:", err);
+    // Last resort: try to parse any search results we got.
+    const fallback = parseSongFromSearch(searchResults, description);
+    if (fallback) return NextResponse.json(fallback);
     return NextResponse.json(
       {
         error: true,
         suggestion:
-          "The AI service is having trouble right now. Please try again in a moment — sing the lyrics or hum the tune.",
+          "The AI service is having trouble right now. Please try again in a moment.",
       },
       { status: 500 }
     );
