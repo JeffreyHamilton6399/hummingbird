@@ -220,24 +220,39 @@ Return ONLY a JSON object (no markdown):
 
 Always return your best guess with alternatives — never return an error unless you truly have zero idea. If unsure, lower confidence and add 3-5 alternatives. Never invent lyrics.`;
 
+const LLM_TIMEOUT_MS = 12000; // hard cap per LLM call
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error("LLM call timed out")), ms)
+    ),
+  ]);
+}
+
 async function callLLM(
   zai: Awaited<ReturnType<typeof ZAI.create>>,
   userContent: string
 ): Promise<string> {
   let lastErr: unknown;
-  for (let attempt = 0; attempt < 4; attempt++) {
+  // 2 attempts only, short backoff — avoid hanging the server.
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const completion = await zai.chat.completions.create({
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: userContent },
-        ],
-      });
+      const completion = await withTimeout(
+        zai.chat.completions.create({
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: userContent },
+          ],
+        }),
+        LLM_TIMEOUT_MS
+      );
       const content = completion.choices?.[0]?.message?.content ?? "";
       if (content) return content;
     } catch (err) {
       lastErr = err;
-      await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt)));
+      if (attempt === 0) await new Promise((r) => setTimeout(r, 1000));
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error("LLM unavailable");
@@ -278,30 +293,26 @@ export async function POST(req: Request) {
   try {
     const zai = await ZAI.create();
 
-    // Step 1: web search (best-effort, with retry).
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        let searchQuery: string;
-        if (description) {
-          searchQuery = `song lyrics "${description.slice(0, 100)}"`;
-        } else {
-          // For melody-only, search for the contour shape keywords
-          const shapeMatch = melody.match(/shape: ([^.]+)/i);
-          const shape = shapeMatch?.[1] || "melody";
-          searchQuery = `famous song ${shape} melody`;
-        }
-        const raw = await zai.functions.invoke("web_search", {
-          query: searchQuery,
-          num: 8,
-        });
-        if (Array.isArray(raw)) {
-          searchResults = raw as SearchResultItem[];
-          searchContext = compactSearchResults(raw);
-        }
-        break;
-      } catch {
-        if (attempt === 0) await new Promise((r) => setTimeout(r, 1000));
+    // Step 1: web search (best-effort, with hard timeout — single attempt).
+    try {
+      let searchQuery: string;
+      if (description) {
+        searchQuery = `song lyrics "${description.slice(0, 100)}"`;
+      } else {
+        const shapeMatch = melody.match(/shape: ([^.]+)/i);
+        const shape = shapeMatch?.[1] || "melody";
+        searchQuery = `famous song ${shape} melody`;
       }
+      const raw = await withTimeout(
+        zai.functions.invoke("web_search", { query: searchQuery, num: 6 }),
+        10000
+      );
+      if (Array.isArray(raw)) {
+        searchResults = raw as SearchResultItem[];
+        searchContext = compactSearchResults(raw);
+      }
+    } catch {
+      // Search failed/timed out — LLM can still reason from the description.
     }
 
     // Step 2: ask the LLM.
