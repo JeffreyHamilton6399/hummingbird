@@ -126,3 +126,26 @@ Work Log:
 Stage Summary:
 - Pushed commit 7ce16ba to GitHub (https://github.com/JeffreyHamilton6399/hummingbird). Remote HEAD verified.
 - Detection is now tuned for real human humming (permissive thresholds + robust normalized ACF + persistence). If it still can't track, the error now tells the user specifically whether the mic heard anything at all, with concrete remediation.
+
+---
+Task ID: 5
+Agent: main (orchestrator)
+Task: "still doesn't work, make it work now" — fix humming once and for all.
+
+Work Log:
+- Found the CRITICAL bug: SpeechRecognition fires `no-speech` + `onend` within ~1-2s when the user hums (no spoken words), and the old `rec.onend` handler called `finish()` — which stopped the audio capture before the user could hum long enough to accumulate a melody. So melody was always empty → "didn't catch any words or melody" error.
+- Fix: decoupled SR from recording. `rec.onend` now does NOTHING (just a comment). Only the user tapping the mic button calls `finish()`. `rec.onerror` ignores no-speech/aborted (expected while humming). The user is now in full control of recording duration.
+- Rewrote melody extraction (buildMelodyContour): replaced fragile per-sample note segmentation (which collapsed melodies when gaps >0.18s created single-sample notes that got filtered as too short) with ROBUST binned-median downsampling:
+  • Collect all accepted pitch samples.
+  • Bin into ~4-10 equal time windows (scales with sample count).
+  • Median frequency per non-empty bin; carry-forward last value for empty bins.
+  • Convert each bin's median to MIDI → relative intervals from the first bin.
+  This is far more tolerant of detection gaps and noise — a few missed frames no longer destroy the contour.
+- Lowered CLARITY_THRESHOLD 0.45→0.30; persistence filter loosened 2.2→3.5 semitones so real melodic movement is accepted; min samples 4; polling stays at 30ms.
+- Added live `currentNote` state + display: shows the detected note name (e.g. "A3") in a green pill while listening, so the user can SEE pitch tracking working in real time. Falls back to "I can hear you — hum a steady note" (amber) when sound is present but no pitch lock, and "waiting for sound…" when silent.
+- Removed dead src/lib/speech.ts (replaced by audio-capture.ts) — it was causing a turbopack "transcriptRef defined multiple times" bundling warning.
+- Lint clean. No console/runtime errors. Melody-only API verified: intervals +0,+4,+7,+4,+0 → "Happy Birthday" 90% with precise explanation.
+- Pushed commit 5a98773 to GitHub. Remote HEAD verified.
+
+Stage Summary:
+- The humming flow should now actually work: hum as long as you like (SR ending no longer cuts you off), see your live detected note name, tap stop, and the binned-median extraction turns your hum into a robust contour the LLM can match. Code on GitHub ready for Vercel.
