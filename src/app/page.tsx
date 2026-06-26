@@ -119,11 +119,20 @@ export default function Home() {
     }
   }, []);
 
-  const { supported, listening, transcript, level, hasMelody, heard, start, stop } =
-    useHummingCapture({
-      onEnd: handleCaptureEnd,
-      onError: handleCaptureError,
-    });
+  const {
+    supported,
+    listening,
+    transcript,
+    level,
+    hasMelody,
+    heard,
+    currentNote,
+    start,
+    stop,
+  } = useHummingCapture({
+    onEnd: handleCaptureEnd,
+    onError: handleCaptureError,
+  });
 
   const toggleMic = React.useCallback(() => {
     if (listening) {
@@ -182,6 +191,7 @@ export default function Home() {
               level={level}
               hasMelody={hasMelody}
               heard={heard}
+              currentNote={currentNote}
               onStop={toggleMic}
             />
           )}
@@ -260,12 +270,14 @@ function ListeningState({
   level,
   hasMelody,
   heard,
+  currentNote,
   onStop,
 }: {
   transcript: string;
   level: number;
   hasMelody: boolean;
   heard: boolean;
+  currentNote: string;
   onStop: () => void;
 }) {
   // Bars react to live input level; CSS animation adds liveliness on top.
@@ -294,28 +306,27 @@ function ListeningState({
         })}
       </div>
 
-      <p className="text-sm text-muted-foreground flex items-center gap-1.5">
-        <AudioLines className="size-3.5 text-red-500" />
-        Listening… tap again to send
-      </p>
-
-      {/* Status indicators */}
-      <div className="flex items-center gap-3 text-xs">
-        {heard && !transcript && !hasMelody ? (
+      {/* Live pitch indicator */}
+      <div className="flex items-center gap-2 text-xs h-5">
+        {currentNote ? (
+          <span className="flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-emerald-600 dark:text-emerald-400 font-medium">
+            <Music4 className="size-3" /> {currentNote}
+          </span>
+        ) : heard ? (
           <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
-            <AudioLines className="size-3" /> I can hear you — keep going
+            <AudioLines className="size-3" /> I can hear you — hum a steady note
           </span>
-        ) : !heard && !transcript ? (
+        ) : (
           <span className="text-muted-foreground/60">waiting for sound…</span>
-        ) : null}
-        {transcript && (
-          <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
-            <AudioLines className="size-3" /> words captured
-          </span>
         )}
         {hasMelody && (
+          <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400 font-medium">
+            ✓ melody tracked
+          </span>
+        )}
+        {transcript && (
           <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
-            <Music4 className="size-3" /> melody detected
+            ✓ words captured
           </span>
         )}
       </div>

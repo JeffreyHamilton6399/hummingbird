@@ -54,18 +54,12 @@ declare global {
 
 /* ================================================================
  * Pitch detection via normalized autocorrelation (ACF)
- *
- * Improvements over naive ACF:
- *  - Properly normalized correlation → clarity is a real [0,1] value
- *  - First-peak-after-descent detection → avoids octave-down errors
- *  - Parabolic interpolation → sub-sample lag precision
- *  - Low, permissive thresholds tuned for real human humming
  * ================================================================ */
 
 const MIN_FREQ = 65; // Hz — low male hum
 const MAX_FREQ = 600; // Hz — high female / whistle-ish hum
-const CLARITY_THRESHOLD = 0.45; // lowered: real humming typically scores 0.4–0.7
-const RMS_THRESHOLD = 0.0025; // lowered silence gate
+const CLARITY_THRESHOLD = 0.3; // permissive: real humming often 0.3–0.7
+const RMS_THRESHOLD = 0.002; // silence gate
 
 function detectPitch(
   buf: Float32Array,
@@ -73,7 +67,6 @@ function detectPitch(
 ): { freq: number; clarity: number; rms: number } {
   const SIZE = buf.length;
 
-  // RMS silence gate
   let sumSq = 0;
   for (let i = 0; i < SIZE; i++) sumSq += buf[i] * buf[i];
   const rms = Math.sqrt(sumSq / SIZE);
@@ -82,8 +75,7 @@ function detectPitch(
   const minLag = Math.max(2, Math.floor(sampleRate / MAX_FREQ));
   const maxLag = Math.min(SIZE - 2, Math.floor(sampleRate / MIN_FREQ));
 
-  // Average (not sum) autocorrelation so normalization is stable regardless
-  // of buffer size. acf[0] is the average energy.
+  // Average autocorrelation. acf[0] is the average energy.
   const acf = new Float32Array(maxLag + 1);
   for (let lag = 0; lag <= maxLag; lag++) {
     let corr = 0;
@@ -112,7 +104,6 @@ function detectPitch(
   }
   if (bestLag < 0 || acf[0] <= 0) return { freq: -1, clarity: 0, rms };
 
-  // Clarity = normalized peak height in [0,1].
   const clarity = bestVal / acf[0];
 
   // Parabolic interpolation around the peak for sub-sample lag precision.
@@ -123,7 +114,7 @@ function detectPitch(
     const c = acf[bestLag + 1];
     const denom = a - 2 * b + c;
     if (denom !== 0) {
-      const shift = 0.5 * (a - c) / denom;
+      const shift = (0.5 * (a - c)) / denom;
       if (Math.abs(shift) <= 1) refinedLag = bestLag + shift;
     }
   }
@@ -132,8 +123,33 @@ function detectPitch(
   return { freq, clarity, rms };
 }
 
+/* ================================================================
+ * Note helpers
+ * ================================================================ */
+
+const NOTE_NAMES = [
+  "C",
+  "C#",
+  "D",
+  "D#",
+  "E",
+  "F",
+  "F#",
+  "G",
+  "G#",
+  "A",
+  "A#",
+  "B",
+];
+
 function freqToMidi(freq: number): number {
   return Math.round(69 + 12 * Math.log2(freq / 440));
+}
+
+function midiToName(midi: number): string {
+  const n = ((midi % 12) + 12) % 12;
+  const octave = Math.floor(midi / 12) - 1;
+  return `${NOTE_NAMES[n]}${octave}`;
 }
 
 function median(arr: number[]): number {
@@ -145,56 +161,27 @@ function median(arr: number[]): number {
     : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
+/* ================================================================
+ * Melody extraction: binned-median downsampling
+ *
+ * Collects all accepted pitch samples, bins them into N equal time
+ * windows, takes the median frequency per non-empty bin, and turns
+ * that into a relative-interval description. Far more robust to noise
+ * and gaps than per-sample note segmentation.
+ * ================================================================ */
+
 interface PitchSample {
   t: number; // seconds from recording start
   freq: number;
   clarity: number;
 }
 
-interface NoteSegment {
-  midi: number;
-  startSec: number;
-  durationSec: number;
-}
-
-function segmentNotes(samples: PitchSample[]): NoteSegment[] {
-  if (samples.length === 0) return [];
-
-  const notes: NoteSegment[] = [];
-  let group: PitchSample[] = [samples[0]];
-  const breakThreshold = 2.5; // semitones
-
-  const flush = () => {
-    if (group.length === 0) return;
-    const medFreq = median(group.map((g) => g.freq));
-    notes.push({
-      midi: freqToMidi(medFreq),
-      startSec: group[0].t,
-      durationSec: group[group.length - 1].t - group[0].t,
-    });
-    group = [];
-  };
-
-  for (let i = 1; i < samples.length; i++) {
-    const s = samples[i];
-    const groupMidi = freqToMidi(
-      median(group.map((g) => g.freq))
-    );
-    const sMidi = freqToMidi(s.freq);
-    const gap = s.t - samples[i - 1].t;
-    if (Math.abs(sMidi - groupMidi) > breakThreshold || gap > 0.18) {
-      flush();
-      group = [s];
-    } else {
-      group.push(s);
-    }
-  }
-  flush();
-
-  // Drop very short blips (but keep if the whole melody is short)
-  return notes.filter(
-    (n) => n.durationSec >= 0.08 || notes.length <= 3
-  );
+export interface MelodyContour {
+  noteCount: number;
+  intervals: number[]; // semitone deltas from the first bin
+  shape: string;
+  description: string; // ready for the LLM
+  noteNames: string[]; // for display
 }
 
 function describeShape(intervals: number[]): string {
@@ -217,29 +204,61 @@ function describeShape(intervals: number[]): string {
   return "varied contour";
 }
 
-export interface MelodyContour {
-  noteCount: number;
-  intervals: number[]; // semitone deltas from the first note
-  shape: string;
-  description: string; // ready for the LLM
-}
+function buildMelodyContour(samples: PitchSample[]): MelodyContour | null {
+  if (samples.length < 4) return null;
 
-function buildMelodyContour(notes: NoteSegment[]): MelodyContour | null {
-  const trimmed = notes.slice(0, 24);
-  if (trimmed.length < 2) return null; // need at least one interval
-  const midis = trimmed.map((n) => n.midi);
+  const tStart = samples[0].t;
+  const tEnd = samples[samples.length - 1].t;
+  const span = Math.max(0.1, tEnd - tStart);
+
+  // Aim for ~8 bins, each holding enough samples to be meaningful.
+  const binCount = Math.min(10, Math.max(4, Math.floor(samples.length / 3)));
+  const bins: PitchSample[][] = Array.from({ length: binCount }, () => []);
+  for (const s of samples) {
+    const idx = Math.min(
+      binCount - 1,
+      Math.floor(((s.t - tStart) / span) * binCount)
+    );
+    bins[idx].push(s);
+  }
+
+  // Median frequency per non-empty bin; carry forward the last value for gaps.
+  const binFreqs: number[] = [];
+  let carry: number | null = null;
+  for (const bin of bins) {
+    if (bin.length > 0) {
+      carry = median(bin.map((b) => b.freq));
+      binFreqs.push(carry);
+    } else if (carry !== null) {
+      binFreqs.push(carry);
+    }
+  }
+  if (binFreqs.length < 2) return null;
+
+  const midis = binFreqs.map((f) => freqToMidi(f));
   const base = midis[0];
   const intervals = midis.map((m) => m - base);
   const shape = describeShape(intervals);
   const intervalsStr = intervals
     .map((i) => (i >= 0 ? "+" : "") + i)
     .join(", ");
-  const description = `Hummed melody with ${trimmed.length} notes. Relative pitch intervals in semitones from the first note: ${intervalsStr}. Contour shape: ${shape}.`;
-  return { noteCount: trimmed.length, intervals, shape, description };
+  const noteNames = midis.map((m) => midiToName(m));
+  const description = `Hummed melody with ${midis.length} notes. Relative pitch intervals in semitones from the first note: ${intervalsStr}. Contour shape: ${shape}. Approximate notes (may be transposed): ${noteNames.join(", ")}.`;
+  return {
+    noteCount: midis.length,
+    intervals,
+    shape,
+    description,
+    noteNames,
+  };
 }
 
 /* ================================================================
  * Combined capture hook: speech recognition + pitch detection
+ *
+ * CRITICAL: SpeechRecognition and audio capture are decoupled.
+ * SpeechRecognition ending (e.g. no-speech timeout while humming)
+ * does NOT stop the recording — only the user tapping "stop" does.
  * ================================================================ */
 
 interface UseHummingCaptureOptions {
@@ -260,6 +279,7 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
   const [level, setLevel] = React.useState(0); // 0-1 live input amplitude
   const [hasMelody, setHasMelody] = React.useState(false);
   const [heard, setHeard] = React.useState(false);
+  const [currentNote, setCurrentNote] = React.useState<string>("");
 
   const recognitionRef = React.useRef<SpeechRecognition | null>(null);
   const audioCtxRef = React.useRef<AudioContext | null>(null);
@@ -322,7 +342,8 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
         ? window.SpeechRecognition || window.webkitSpeechRecognition
         : undefined;
     const hasGUM =
-      typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
+      typeof navigator !== "undefined" &&
+      !!navigator.mediaDevices?.getUserMedia;
     setSupported(!!SR || hasGUM);
     return () => cleanupAudio();
   }, [cleanupAudio]);
@@ -335,18 +356,19 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
 
     if (recognitionRef.current) {
       try {
-        recognitionRef.current.stop();
+        recognitionRef.current.abort();
       } catch {
         // ignore
       }
+      recognitionRef.current = null;
     }
 
-    const notes = segmentNotes(samplesRef.current);
-    const melody = buildMelodyContour(notes);
+    const melody = buildMelodyContour(samplesRef.current);
     const finalTranscript = transcriptRef.current.trim();
     const finalHeard = heardRef.current;
 
     setListening(false);
+    setCurrentNote("");
     onEndRef.current?.({
       transcript: finalTranscript,
       melody,
@@ -365,10 +387,12 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
     setLevel(0);
     setHasMelody(false);
     setHeard(false);
+    setCurrentNote("");
     startTimeRef.current = performance.now();
     setListening(true);
 
-    // --- Speech recognition (best-effort, for spoken words) ---
+    // --- Speech recognition (best-effort, for spoken words only) ---
+    // Decoupled from audio capture: SR ending does NOT stop the recording.
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (SR) {
       try {
@@ -386,6 +410,7 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
           setTranscript(text);
         };
         rec.onerror = (event: SpeechRecognitionErrorEvent) => {
+          // no-speech / aborted are expected while humming — not real errors.
           if (
             event.error === "not-allowed" ||
             event.error === "service-not-allowed"
@@ -394,10 +419,8 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
           }
         };
         rec.onend = () => {
-          // If SR ended on its own but audio is still recording → finish up.
-          if (pollRef.current && !finishedRef.current) {
-            finish();
-          }
+          // SR ended (likely no-speech while humming). Do NOT stop the
+          // recording — the user controls that via the mic button.
         };
         recognitionRef.current = rec;
         rec.start();
@@ -409,7 +432,6 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
     // --- Pitch detection via getUserMedia + Web Audio API ---
     const hasGUM = !!navigator.mediaDevices?.getUserMedia;
     if (!hasGUM && !SR) {
-      // Neither input method works.
       setListening(false);
       onErrorRef.current?.("unsupported");
       return;
@@ -452,7 +474,6 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
           if (!analyserRef.current || !audioCtxRef.current) return;
           analyserRef.current.getFloatTimeDomainData(buf);
 
-          // Pitch detection (returns rms too)
           const { freq, clarity, rms } = detectPitch(buf, ctx.sampleRate);
 
           // Live input level for the waveform
@@ -465,32 +486,32 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
           }
 
           if (freq > 0 && clarity > CLARITY_THRESHOLD) {
-            // Persistence: only accept if it's the first detection, or within
-            // ~2 semitones of the last accepted sample. This filters transient
-            // noise that happens to cross the lowered threshold.
+            // Persistence filter: accept if first detection, or within ~3.5
+            // semitones of the last accepted sample. Loose enough to follow
+            // a real melody, tight enough to reject transient noise.
             const last = lastFreqRef.current;
             const accept =
-              last < 0 ||
-              Math.abs(12 * Math.log2(freq / last)) <= 2.2;
+              last < 0 || Math.abs(12 * Math.log2(freq / last)) <= 3.5;
             if (accept) {
               const t = (performance.now() - startTimeRef.current) / 1000;
               samplesRef.current.push({ t, freq, clarity });
               lastFreqRef.current = freq;
-              if (samplesRef.current.length >= 2) setHasMelody(true);
+              // Live note display
+              setCurrentNote(midiToName(freqToMidi(freq)));
+              if (samplesRef.current.length >= 4) setHasMelody(true);
             }
+          } else if (freq < 0 && rms > RMS_THRESHOLD) {
+            // Sound but no clear pitch — don't clear the note immediately
           }
         }, 30);
       } catch {
-        // Mic permission denied or hardware error.
         if (!SR) {
-          // No fallback at all.
           setListening(false);
           onErrorRef.current?.("mic-denied");
         }
-        // If SR is running, it will still capture words.
       }
     }
-  }, [finish]);
+  }, []);
 
   const stop = React.useCallback(() => {
     finish();
@@ -505,6 +526,7 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
     setLevel(0);
     setHasMelody(false);
     setHeard(false);
+    setCurrentNote("");
   }, []);
 
   return {
@@ -514,6 +536,7 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
     level,
     hasMelody,
     heard,
+    currentNote,
     start,
     stop,
     reset,
