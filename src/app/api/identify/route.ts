@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { callGrok } from "@/lib/grok";
+import { callHuggingFace } from "@/lib/hf";
 import type { SongResult } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -69,7 +69,7 @@ export async function POST(req: Request) {
   const userContent = parts.join("\n\n");
 
   try {
-    const content = await callGrok([
+    const content = await callHuggingFace([
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: userContent },
     ]);
@@ -98,19 +98,22 @@ export async function POST(req: Request) {
       alternatives: [],
     });
   } catch (err) {
-    console.error("[/api/identify] Grok error:", err);
+    console.error("[/api/identify] HuggingFace error:", err);
     const msg = err instanceof Error ? err.message : String(err);
     let suggestion =
       "I couldn't identify that one. Try singing a few of the lyrics out loud — even rough words help a lot.";
-    if (msg.includes("401") || msg.includes("Invalid")) {
+    if (msg.includes("401") || msg.includes("403") || msg.includes("Unauthorized")) {
       suggestion =
-        "The GROK_API_KEY is invalid. Check it at https://console.x.ai/";
+        "The HUGGINGFACE_API_KEY is invalid. Get a free one at https://huggingface.co/settings/tokens";
     } else if (msg.includes("429") || msg.includes("rate limit") || msg.includes("quota")) {
       suggestion =
-        "Grok API rate limit hit. Wait a minute and try again, or check your plan at https://console.x.ai/";
+        "Free tier rate limit hit. Wait a minute and try again.";
     } else if (msg.includes("not set")) {
       suggestion =
-        "GROK_API_KEY isn't set. Get one at https://console.x.ai/ and add it to your environment variables.";
+        "HUGGINGFACE_API_KEY isn't set. Get a free one at https://huggingface.co/settings/tokens";
+    } else if (msg.includes("aborted") || msg.includes("timed out")) {
+      suggestion =
+        "The AI took too long to respond. Try again, or sing fewer words.";
     }
     return NextResponse.json(
       { error: true, suggestion },
