@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getGemini } from "@/lib/gemini";
+import { callGrok } from "@/lib/grok";
 import type { SongResult } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -21,13 +21,13 @@ function extractJson(content: string): unknown {
   return JSON.parse(text);
 }
 
-const SYSTEM_PROMPT = `You are "Hummingbird", a music identification expert. A user hummed, sang, or spoke about a song.
+const SYSTEM_PROMPT = `You are "Hummingbird", a music identification expert. A user hummed, sang, or spoke about a song. You have broad knowledge of songs, lyrics, and melodies from your training data.
 
 Inputs you may receive:
 - SPOKEN WORDS: sung lyrics or a description (PRIMARY signal — lean on it heavily).
 - HUMMED MELODY: an approximate contour (direction sequence: up/down/same). The user may be a POOR singer — never match by absolute pitch. Match by contour SHAPE only.
 
-If lyrics are present, they dominate. Even a few rough words can identify a song. For melody-only, try to match famous melodies by their contour shape (e.g. "up up up-a-lot same down" = Happy Birthday). You can use Google Search to look up lyrics and confirm matches.
+If lyrics are present, they dominate. Even a few rough words can identify a song. For melody-only, try to match famous melodies by their contour shape (e.g. "up up up-a-lot same down" = Happy Birthday, "same same up same same" = Twinkle Twinkle).
 
 Always return your best guess with alternatives — never return an error unless you truly have zero idea. If unsure, lower confidence and add 3-5 alternatives. Never invent lyrics.
 
@@ -63,35 +63,33 @@ export async function POST(req: Request) {
   if (description.length > 800) description = description.slice(0, 800);
   if (melody.length > 800) melody = melody.slice(0, 800);
 
-  // Build the user prompt
   const parts: string[] = [];
   if (description) parts.push(`Spoken words: "${description}"`);
   if (melody) parts.push(`Hummed melody: ${melody}`);
   const userContent = parts.join("\n\n");
 
   try {
-    const { model } = getGemini();
-
-    // Single call with Google Search grounding built-in.
-    const result = await model.generateContent([
-      { text: SYSTEM_PROMPT },
-      { text: userContent },
+    const content = await callGrok([
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: userContent },
     ]);
 
-    const content = result.response.text();
     const parsed = extractJson(content) as SongResult;
 
     if (parsed && typeof parsed === "object") {
       if (parsed.error === true) {
         return NextResponse.json(parsed);
       }
-      if (typeof parsed.title === "string" && typeof parsed.artist === "string") {
+      if (
+        typeof parsed.title === "string" &&
+        typeof parsed.artist === "string"
+      ) {
         if (typeof parsed.confidence !== "number") parsed.confidence = 50;
         return NextResponse.json(parsed);
       }
     }
 
-    // If JSON parsing failed, try to salvage the raw text.
+    // JSON parse failed — salvage raw text.
     return NextResponse.json({
       title: "Unknown",
       artist: "Unknown",
@@ -100,26 +98,22 @@ export async function POST(req: Request) {
       alternatives: [],
     });
   } catch (err) {
-    console.error("[/api/identify] Gemini error:", err);
+    console.error("[/api/identify] Grok error:", err);
     const msg = err instanceof Error ? err.message : String(err);
     let suggestion =
       "I couldn't identify that one. Try singing a few of the lyrics out loud — even rough words help a lot.";
-    // Surface quota/region/key errors clearly so the user can fix them.
-    if (msg.includes("429") || msg.includes("quota")) {
+    if (msg.includes("401") || msg.includes("Invalid")) {
       suggestion =
-        "The Gemini API key has hit its quota limit. Enable billing on your Google AI project (https://aistudio.google.com/apikey) or wait a minute and try again.";
-    } else if (msg.includes("location is not supported")) {
+        "The GROK_API_KEY is invalid. Check it at https://console.x.ai/";
+    } else if (msg.includes("429") || msg.includes("rate limit") || msg.includes("quota")) {
       suggestion =
-        "The Gemini API isn't available in this region. Try a different AI provider.";
-    } else if (msg.includes("API key not valid")) {
+        "Grok API rate limit hit. Wait a minute and try again, or check your plan at https://console.x.ai/";
+    } else if (msg.includes("not set")) {
       suggestion =
-        "The GEMINI_API_KEY is invalid. Check it at https://aistudio.google.com/apikey";
+        "GROK_API_KEY isn't set. Get one at https://console.x.ai/ and add it to your environment variables.";
     }
     return NextResponse.json(
-      {
-        error: true,
-        suggestion,
-      },
+      { error: true, suggestion },
       { status: 500 }
     );
   }
