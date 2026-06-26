@@ -22,6 +22,81 @@ function extractJson(content: string): unknown {
   return JSON.parse(text);
 }
 
+/**
+ * Filter out humming/sound-effect syllables from a transcript.
+ * Returns the cleaned transcript if it contains real words, or "" if the
+ * transcript was ONLY humming sounds (so the LLM doesn't hallucinate from
+ * nonsense like "pa bum bum bum" → "Peppa Pig theme").
+ *
+ * Humming sounds: la, da, dum, pa, bum, na, naa, oh, ah, mm, hmm, doo, da,
+ * pa-pa, la-la, etc. — onomatopoeia and vocal sounds, not actual lyrics.
+ */
+const HUMMING_TOKENS = new Set([
+  // Common humming/singing syllables
+  "la", "laa", "la-la", "lalala", "lalalala",
+  "da", "daa", "da-da", "dadada",
+  "dum", "dum-dum", "dumdum",
+  "pa", "paa", "pa-pa", "papapa",
+  "bum", "bum-bum", "bumbum",
+  "na", "naa", "na-na", "nanana",
+  "oh", "ohh", "oh-oh",
+  "ah", "ahh", "ah-ah",
+  "mm", "hmm", "mmm",
+  "doo", "doo-doo", "doodoo",
+  "ba", "baa", "ba-ba", "bababa",
+  "wa", "waa", "wa-wa",
+  "yeah", "yea", "ya",
+  "ooh", "oooh",
+  "ay", "ayy", "ay-ay",
+  "hey", "heyy",
+  "uh", "uhh",
+  "ha", "haa", "haha",
+  "woo", "wooo",
+  "shoo", "shoo-be-doo",
+  "shabada", "skibidi",
+  "de", "dee", "de-de",
+  "ma", "maa", "ma-ma",
+  "ta", "taa", "ta-ta",
+  "fa", "faa",
+  "ga", "gaa",
+  "ra", "raa",
+  "ya", "yaa",
+  "za", "zaa",
+]);
+
+function filterHummingSounds(transcript: string): string {
+  const raw = transcript.trim().toLowerCase();
+  if (!raw) return "";
+
+  // Tokenize (split on whitespace, strip punctuation)
+  const tokens = raw
+    .replace(/[^\w\s-]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (tokens.length === 0) return "";
+
+  // Count how many tokens are humming sounds vs real words
+  let hummingCount = 0;
+  const realWords: string[] = [];
+  for (const token of tokens) {
+    if (HUMMING_TOKENS.has(token) || /^(la|da|na|ba|pa|dum|bum|mm|hmm|doo|oo|ah|oh|uh|ha|woo)+[-]?(la|da|na|ba|pa|dum|bum|mm|hmm|doo|oo|ah|oh|uh|ha|woo)*$/i.test(token)) {
+      hummingCount++;
+    } else if (token.length >= 2) {
+      realWords.push(token);
+    }
+  }
+
+  // If more than half the tokens are humming sounds, treat as humming only.
+  // Also if there are fewer than 2 real words, it's not enough to identify a song.
+  if (hummingCount >= tokens.length / 2 || realWords.length < 2) {
+    return "";
+  }
+
+  // Return only the real words (re-joined)
+  return realWords.join(" ");
+}
+
 function auddToSongResult(r: AudDResult): SongResult {
   const year = r.release_date
     ? parseInt(r.release_date.slice(0, 4), 10)
@@ -121,13 +196,17 @@ export async function POST(req: Request) {
   }
 
   // --- FALLBACK: LLM lyrics matching (less reliable — may hallucinate) ---
-  if (transcript) {
+  // Only use this if the transcript contains REAL words, not humming sounds.
+  // "pa bum bum bum" is humming, not lyrics — sending it to the LLM makes it
+  // hallucinate wrong answers like "Peppa Pig theme".
+  const cleanTranscript = filterHummingSounds(transcript);
+  if (cleanTranscript) {
     try {
       const content = await callHuggingFace([
         { role: "system", content: SYSTEM_PROMPT },
         {
           role: "user",
-          content: `Spoken words: "${transcript.slice(0, 800)}"`,
+          content: `Spoken words: "${cleanTranscript.slice(0, 800)}"`,
         },
       ]);
       const parsed = extractJson(content) as SongResult;
@@ -145,6 +224,8 @@ export async function POST(req: Request) {
     }
   }
 
+  // If we had audio but AudD didn't match, and the transcript was just humming
+  // sounds, give an honest error instead of hallucinating.
   return NextResponse.json({
     error: true,
     suggestion: audioBlob
