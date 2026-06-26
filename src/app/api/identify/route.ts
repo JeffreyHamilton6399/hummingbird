@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import ZAI from "z-ai-web-dev-sdk";
+import { getZAI } from "@/lib/zai";
 import type { SongResult } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -232,7 +232,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 async function callLLM(
-  zai: Awaited<ReturnType<typeof ZAI.create>>,
+  zai: Awaited<ReturnType<typeof getZAI>>,
   userContent: string
 ): Promise<string> {
   let lastErr: unknown;
@@ -291,7 +291,7 @@ export async function POST(req: Request) {
   let searchContext = "";
 
   try {
-    const zai = await ZAI.create();
+    const zai = await getZAI();
 
     // Step 1: web search (best-effort, with hard timeout — single attempt).
     try {
