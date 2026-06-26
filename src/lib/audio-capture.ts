@@ -484,6 +484,24 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
     }
 
     if (hasGUM) {
+      // CRITICAL: Create + resume the AudioContext BEFORE any await, within
+      // the user-gesture context. Chrome refuses to start audio after an
+      // await, leaving the context suspended and getFloatTimeDomainData
+      // returning all zeros (which is why "heard" never flipped).
+      const AC = window.AudioContext || window.webkitAudioContext;
+      let ctx: AudioContext | null = null;
+      if (AC) {
+        try {
+          ctx = new AC();
+          if (ctx.state === "suspended") {
+            // resume() within the gesture handler — no await before this.
+            void ctx.resume();
+          }
+        } catch {
+          ctx = null;
+        }
+      }
+
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: {
@@ -494,14 +512,13 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
         });
         streamRef.current = stream;
 
-        const AC = window.AudioContext || window.webkitAudioContext;
-        if (!AC) return;
-        const ctx = new AC();
+        if (!ctx) return;
+        // Best-effort resume again now that we definitely have a stream.
         if (ctx.state === "suspended") {
           try {
             await ctx.resume();
           } catch {
-            // ignore
+            // ignore — context may still be usable
           }
         }
         audioCtxRef.current = ctx;
@@ -518,9 +535,10 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
         const buf = new Float32Array(analyser.fftSize);
         pollRef.current = setInterval(() => {
           if (!analyserRef.current || !audioCtxRef.current) return;
+          if (finishedRef.current) return; // stop processing after finish()
           analyserRef.current.getFloatTimeDomainData(buf);
 
-          const { freq, clarity, rms } = detectPitch(buf, ctx.sampleRate);
+          const { freq, clarity, rms } = detectPitch(buf, ctx!.sampleRate);
 
           // Live input level for the waveform
           setLevel(Math.min(1, rms * 6));
@@ -546,14 +564,27 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
               setCurrentNote(midiToName(freqToMidi(freq)));
               if (samplesRef.current.length >= 4) setHasMelody(true);
             }
-          } else if (freq < 0 && rms > RMS_THRESHOLD) {
-            // Sound but no clear pitch — don't clear the note immediately
           }
         }, 30);
-      } catch {
+      } catch (err) {
+        // getUserMedia failed (permission denied, no mic, etc.).
+        // ALWAYS report this — don't swallow it even if SR is running.
+        if (ctx) {
+          try {
+            void ctx.close();
+          } catch {
+            // ignore
+          }
+        }
+        // If SR is still running, let it try to capture words; but flag that
+        // audio capture failed so the error message is accurate.
         if (!SR) {
           setListening(false);
           onErrorRef.current?.("mic-denied");
+        } else {
+          // SR exists — it might still capture words, so don't stop listening.
+          // But log so we know audio capture failed.
+          console.warn("[hummingbird] getUserMedia failed, SR-only:", err);
         }
       }
     }
