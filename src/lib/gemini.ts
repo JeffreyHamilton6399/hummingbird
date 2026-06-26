@@ -23,7 +23,7 @@ export function getGemini() {
   if (!cachedClient) {
     cachedClient = new GoogleGenerativeAI(apiKey);
     cachedModel = cachedClient.getGenerativeModel({
-      model: "gemini-1.5-flash",
+      model: "gemini-2.0-flash",
       // Google Search grounding tool — lets Gemini search the web for lyrics.
       tools: [{ googleSearchRetrieval: {} }],
     });

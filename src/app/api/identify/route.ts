@@ -101,11 +101,24 @@ export async function POST(req: Request) {
     });
   } catch (err) {
     console.error("[/api/identify] Gemini error:", err);
+    const msg = err instanceof Error ? err.message : String(err);
+    let suggestion =
+      "I couldn't identify that one. Try singing a few of the lyrics out loud — even rough words help a lot.";
+    // Surface quota/region/key errors clearly so the user can fix them.
+    if (msg.includes("429") || msg.includes("quota")) {
+      suggestion =
+        "The Gemini API key has hit its quota limit. Enable billing on your Google AI project (https://aistudio.google.com/apikey) or wait a minute and try again.";
+    } else if (msg.includes("location is not supported")) {
+      suggestion =
+        "The Gemini API isn't available in this region. Try a different AI provider.";
+    } else if (msg.includes("API key not valid")) {
+      suggestion =
+        "The GEMINI_API_KEY is invalid. Check it at https://aistudio.google.com/apikey";
+    }
     return NextResponse.json(
       {
         error: true,
-        suggestion:
-          "I couldn't identify that one. Try singing a few of the lyrics out loud — even rough words help a lot.",
+        suggestion,
       },
       { status: 500 }
     );
