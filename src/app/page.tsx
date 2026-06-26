@@ -30,14 +30,25 @@ export default function Home() {
   const [submittedLabel, setSubmittedLabel] = React.useState("");
 
   const identify = React.useCallback(
-    async (transcript: string, melody: MelodyContour | null) => {
+    async (
+      transcript: string,
+      melody: MelodyContour | null,
+      heard: boolean
+    ) => {
       const words = transcript.trim();
       const melodyDesc = melody?.description ?? "";
 
       if (!words && !melodyDesc) {
-        setErrorMsg(
-          "I didn't catch any words or melody. Sing the lyrics out loud, or hum the tune clearly — make sure your mic is on and you're in a quiet spot."
-        );
+        // Distinguish "silent / mic off" from "heard you but couldn't track".
+        if (heard) {
+          setErrorMsg(
+            "I could hear you, but couldn't track the melody clearly. Try humming a bit louder, closer to the mic, and hold each note briefly — or sing the lyrics instead."
+          );
+        } else {
+          setErrorMsg(
+            "I didn't catch any sound. Make sure your mic is on and you're in a quiet spot, then sing the lyrics or hum the tune."
+          );
+        }
         setState("error");
         return;
       }
@@ -89,8 +100,12 @@ export default function Home() {
   );
 
   const handleCaptureEnd = React.useCallback(
-    (captured: { transcript: string; melody: MelodyContour | null }) => {
-      identify(captured.transcript, captured.melody);
+    (captured: {
+      transcript: string;
+      melody: MelodyContour | null;
+      heard: boolean;
+    }) => {
+      identify(captured.transcript, captured.melody, captured.heard);
     },
     [identify]
   );
@@ -104,7 +119,7 @@ export default function Home() {
     }
   }, []);
 
-  const { supported, listening, transcript, level, hasMelody, start, stop } =
+  const { supported, listening, transcript, level, hasMelody, heard, start, stop } =
     useHummingCapture({
       onEnd: handleCaptureEnd,
       onError: handleCaptureError,
@@ -166,6 +181,7 @@ export default function Home() {
               transcript={transcript}
               level={level}
               hasMelody={hasMelody}
+              heard={heard}
               onStop={toggleMic}
             />
           )}
@@ -243,11 +259,13 @@ function ListeningState({
   transcript,
   level,
   hasMelody,
+  heard,
   onStop,
 }: {
   transcript: string;
   level: number;
   hasMelody: boolean;
+  heard: boolean;
   onStop: () => void;
 }) {
   // Bars react to live input level; CSS animation adds liveliness on top.
@@ -283,12 +301,17 @@ function ListeningState({
 
       {/* Status indicators */}
       <div className="flex items-center gap-3 text-xs">
-        {transcript ? (
+        {heard && !transcript && !hasMelody ? (
+          <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
+            <AudioLines className="size-3" /> I can hear you — keep going
+          </span>
+        ) : !heard && !transcript ? (
+          <span className="text-muted-foreground/60">waiting for sound…</span>
+        ) : null}
+        {transcript && (
           <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
             <AudioLines className="size-3" /> words captured
           </span>
-        ) : (
-          <span className="text-muted-foreground/60">no words yet</span>
         )}
         {hasMelody && (
           <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
