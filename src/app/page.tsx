@@ -28,6 +28,7 @@ export default function Home() {
   const [result, setResult] = React.useState<SongResult | null>(null);
   const [errorMsg, setErrorMsg] = React.useState("");
   const [submittedLabel, setSubmittedLabel] = React.useState("");
+  const [text, setText] = React.useState("");
 
   const identify = React.useCallback(
     async (
@@ -148,7 +149,20 @@ export default function Home() {
     setResult(null);
     setErrorMsg("");
     setSubmittedLabel("");
+    setText("");
   }, []);
+
+  const submitText = React.useCallback(
+    (e: React.FormEvent) => {
+      e.preventDefault();
+      const t = text.trim();
+      if (!t) return;
+      // Text path: no melody, but treat as "heard" so we don't show the
+      // silent-mic error.
+      identify(t, null, true);
+    },
+    [text, identify]
+  );
 
   return (
     <div className="h-dvh flex flex-col overflow-hidden bg-background text-foreground">
@@ -182,7 +196,13 @@ export default function Home() {
       <main className="flex-1 min-h-0 overflow-y-auto hum-scroll">
         <div className="mx-auto w-full max-w-xl px-4 py-6 min-h-full flex flex-col items-center justify-center">
           {state === "idle" && (
-            <IdleState micSupported={supported} onToggleMic={toggleMic} />
+            <IdleState
+              micSupported={supported}
+              onToggleMic={toggleMic}
+              text={text}
+              setText={setText}
+              onSubmitText={submitText}
+            />
           )}
 
           {state === "listening" && (

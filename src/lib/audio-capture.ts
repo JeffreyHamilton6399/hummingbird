@@ -178,29 +178,43 @@ interface PitchSample {
 
 export interface MelodyContour {
   noteCount: number;
-  intervals: number[]; // semitone deltas from the first bin
+  directions: string[]; // "up" | "down" | "same" — forgiving contour
+  coarseSteps: string[]; // "up a lot" | "up a little" | "same" | ...
+  range: number; // semitone span (key-invariant)
   shape: string;
   description: string; // ready for the LLM
   noteNames: string[]; // for display
 }
 
-function describeShape(intervals: number[]): string {
-  if (intervals.length < 2) return "brief melody";
-  let rises = 0;
-  let falls = 0;
-  for (let i = 1; i < intervals.length; i++) {
-    if (intervals[i] > intervals[i - 1]) rises++;
-    else if (intervals[i] < intervals[i - 1]) falls++;
+function describeShape(directions: string[]): string {
+  if (directions.length < 1) return "brief melody";
+  const ups = directions.filter((d) => d === "up").length;
+  const downs = directions.filter((d) => d === "down").length;
+  if (ups > 0 && downs === 0) return "rises steadily";
+  if (downs > 0 && ups === 0) return "falls steadily";
+  // Find peak/valley positions
+  let peakIdx = -1;
+  let valleyIdx = -1;
+  let peakVal = 0;
+  let valleyVal = 0;
+  let run = 0;
+  for (let i = 0; i < directions.length; i++) {
+    if (directions[i] === "up") run++;
+    else if (directions[i] === "down") run--;
+    if (peakIdx < 0 || run > peakVal) {
+      peakVal = run;
+      peakIdx = i;
+    }
+    if (valleyIdx < 0 || run < valleyVal) {
+      valleyVal = run;
+      valleyIdx = i;
+    }
   }
-  const peakIdx = intervals.indexOf(Math.max(...intervals));
-  const valleyIdx = intervals.indexOf(Math.min(...intervals));
-  if (rises > 0 && falls === 0) return "rises steadily";
-  if (falls > 0 && rises === 0) return "falls steadily";
-  if (peakIdx > 0 && peakIdx < intervals.length - 1 && falls > 0)
-    return `rises to a peak around note ${peakIdx + 1} then falls`;
-  if (valleyIdx > 0 && valleyIdx < intervals.length - 1 && rises > 0)
-    return `falls to a low around note ${valleyIdx + 1} then rises`;
-  if (rises + falls >= 4) return "undulating melody";
+  if (peakIdx > 0 && peakIdx < directions.length - 1 && downs > 0)
+    return `rises to a peak around step ${peakIdx + 1} then falls`;
+  if (valleyIdx > 0 && valleyIdx < directions.length - 1 && ups > 0)
+    return `falls to a low around step ${valleyIdx + 1} then rises`;
+  if (ups + downs >= 4) return "undulating melody";
   return "varied contour";
 }
 
@@ -211,7 +225,7 @@ function buildMelodyContour(samples: PitchSample[]): MelodyContour | null {
   const tEnd = samples[samples.length - 1].t;
   const span = Math.max(0.1, tEnd - tStart);
 
-  // Aim for ~8 bins, each holding enough samples to be meaningful.
+  // Bin samples into time windows; take median frequency per bin.
   const binCount = Math.min(10, Math.max(4, Math.floor(samples.length / 3)));
   const bins: PitchSample[][] = Array.from({ length: binCount }, () => []);
   for (const s of samples) {
@@ -222,7 +236,6 @@ function buildMelodyContour(samples: PitchSample[]): MelodyContour | null {
     bins[idx].push(s);
   }
 
-  // Median frequency per non-empty bin; carry forward the last value for gaps.
   const binFreqs: number[] = [];
   let carry: number | null = null;
   for (const bin of bins) {
@@ -236,17 +249,50 @@ function buildMelodyContour(samples: PitchSample[]): MelodyContour | null {
   if (binFreqs.length < 2) return null;
 
   const midis = binFreqs.map((f) => freqToMidi(f));
-  const base = midis[0];
-  const intervals = midis.map((m) => m - base);
-  const shape = describeShape(intervals);
-  const intervalsStr = intervals
-    .map((i) => (i >= 0 ? "+" : "") + i)
-    .join(", ");
   const noteNames = midis.map((m) => midiToName(m));
-  const description = `Hummed melody with ${midis.length} notes. Relative pitch intervals in semitones from the first note: ${intervalsStr}. Contour shape: ${shape}. Approximate notes (may be transposed): ${noteNames.join(", ")}.`;
+
+  // FORGIVING contour: direction + coarse magnitude, NOT exact semitones.
+  // A bad singer wobbles ±1-2 semitones, so treat small changes as "same".
+  const SAME_THRESHOLD = 1.5; // semitones — absorbs natural vocal wobble
+  const BIG_STEP = 4; // semitones — "a lot" vs "a little"
+  const directions: string[] = [];
+  const coarseSteps: string[] = [];
+  for (let i = 1; i < midis.length; i++) {
+    const delta = midis[i] - midis[i - 1];
+    if (Math.abs(delta) <= SAME_THRESHOLD) {
+      directions.push("same");
+      coarseSteps.push("same");
+    } else if (delta > 0) {
+      directions.push("up");
+      coarseSteps.push(delta >= BIG_STEP ? "up a lot" : "up a little");
+    } else {
+      directions.push("down");
+      coarseSteps.push(-delta >= BIG_STEP ? "down a lot" : "down a little");
+    }
+  }
+
+  const range = Math.max(...midis) - Math.min(...midis);
+  const shape = describeShape(directions);
+
+  const directionStr = directions.join(" → ");
+  const coarseStr = coarseSteps.join(", ");
+  const noteNamesStr = noteNames.join(", ");
+
+  // Description for the LLM. Emphasizes contour SHAPE (key-invariant,
+  // bad-singer-tolerant) over exact pitches.
+  const description = `Approximate hummed/sung melody contour (the singer may be off-key or transposed to a different key — do NOT match by absolute pitch or exact semitones).
+
+Most reliable — direction sequence (up/down/same between consecutive notes): ${directionStr}.
+Coarse step pattern: ${coarseStr}.
+Overall shape: ${shape}. Spans about ${range} semitones total over ${midis.length} steps (~${span.toFixed(1)}s). Approximate notes (likely transposed, ignore absolute): ${noteNamesStr}.
+
+Match this to famous melodies by their CONTOUR SHAPE and step pattern, not by exact intervals. Examples of contour matching: "Twinkle Twinkle" = same, same, up, same, same; "Happy Birthday" = up, up, up-a-lot, same, down; "Somewhere Over the Rainbow" = up-a-lot (octave), down, same.`;
+
   return {
     noteCount: midis.length,
-    intervals,
+    directions,
+    coarseSteps,
+    range,
     shape,
     description,
     noteNames,

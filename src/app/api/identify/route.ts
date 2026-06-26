@@ -105,10 +105,14 @@ export async function POST(req: Request) {
     // Step 2: ask the LLM to identify the song.
     const systemPrompt = `You are "Hummingbird", a music identification expert. A user hummed, sang, or spoke about a song. You receive up to two inputs:
 
-1. SPOKEN WORDS — a transcript of what the user said (lyrics, a description, the era, the singer's gender, etc.). May be empty.
-2. HUMMED MELODY — a textual description of the melody's pitch contour, given as relative intervals in semitones from the first note plus a shape description. May be null.
+1. SPOKEN WORDS (PRIMARY signal) — a transcript of sung lyrics or a spoken description. This is the MOST RELIABLE signal. If present, lean on it heavily: search for the lyrics, quote them, and match.
+2. HUMMED MELODY (secondary, approximate) — a description of the melody's CONTOUR as a direction sequence (up / down / same) and coarse step sizes.
 
-Famous melodies have distinctive interval patterns. Match the hummed contour to well-known songs using your knowledge of melody. If the user also spoke words, combine both signals. Quote or reference the user's words when explaining the match.
+CRITICAL — the user may be a POOR singer:
+- They will NOT sing in the original key. Never match by absolute pitch or exact semitones.
+- Their exact intervals may be wrong. Do NOT compare semitone numbers to the original song.
+- DO match the melody by its CONTOUR SHAPE — the sequence of ups, downs, and sames — which even a bad singer conveys. Famous melodies have distinctive contour shapes (e.g. "Twinkle Twinkle" = same-same-up-same-same; "Happy Birthday" = up-up-up-a-lot-same-down; "Somewhere Over the Rainbow" opens with a big upward leap).
+- Combine both signals when both are present. If lyrics are present, they dominate; the melody is a confirming hint. If only the melody is present, match famous melodies by contour shape and be honest about lower confidence.
 
 Return ONLY a JSON object (no markdown, no prose) with this exact shape:
 {
@@ -116,7 +120,7 @@ Return ONLY a JSON object (no markdown, no prose) with this exact shape:
   "artist": string,
   "year": number | undefined,
   "confidence": number,            // 0-100
-  "why": string,                   // 1-3 sentences explaining the match, referencing the user's words/melody
+  "why": string,                   // 1-3 sentences explaining the match, referencing the user's words and/or melody contour
   "lyrics_snippet": string | undefined,  // <= 25 words, or omit if unsure
   "alternatives": [                // 0-4 other likely songs, ranked by confidence
     { "title": string, "artist": string, "year": number | undefined, "confidence": number }
@@ -126,7 +130,7 @@ Return ONLY a JSON object (no markdown, no prose) with this exact shape:
 Rules:
 - If you are fairly sure (>= 70), still include 1-2 alternatives.
 - If you are not sure, return your best guess with a lower confidence and 3-5 alternatives.
-- If you truly cannot identify it, return: { "error": true, "suggestion": "Try singing the lyrics out loud, or mention the genre, decade, or the singer's voice. Humming works best with famous melodies." }
+- If you truly cannot identify it, return: { "error": true, "suggestion": "Try singing some of the lyrics out loud — even a few words helps a lot. Or mention the genre, decade, or the singer's voice." }
 - Never invent fake lyrics. If unsure of the exact snippet, omit lyrics_snippet.
 - Keep "why" concise and human.`;
 
