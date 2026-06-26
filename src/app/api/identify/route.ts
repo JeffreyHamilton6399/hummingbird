@@ -49,73 +49,159 @@ function extractJson(content: string): unknown {
   return JSON.parse(text);
 }
 
+// Domains that indicate a search result is about a song.
+const MUSIC_DOMAINS = [
+  "genius.com",
+  "azlyrics.com",
+  "musixmatch.com",
+  "lyrics",
+  "youtube.com",
+  "spotify.com",
+  "apple.com",
+  "wikipedia.org",
+  "metrolyrics.com",
+  "songlyrics.com",
+];
+
+function isMusicResult(item: SearchResultItem): boolean {
+  const host = (item.host_name || "").toLowerCase();
+  const text = ((item.name || "") + " " + (item.snippet || "")).toLowerCase();
+  if (MUSIC_DOMAINS.some((d) => host.includes(d) || text.includes(d)))
+    return true;
+  if (text.includes("lyrics") || text.includes("song by") || text.includes("official video"))
+    return true;
+  return false;
+}
+
 /**
- * Parse search results server-side to extract a best-guess song, even when
- * the LLM is unavailable. Looks for "Title - Artist" or "Title by Artist"
- * patterns in result titles/snippets.
+ * Smart parser: extract (title, artist) from a search result's title/snippet.
+ * Handles common formats:
+ *   "Artist - Song Title (Lyrics)"
+ *   "Song Title by Artist | Lyrics"
+ *   "Artist – Song Title (Official Video)"
+ *   "Song Title Lyrics - Artist"
  */
-function parseSongFromSearch(
+function extractSongFromText(
+  rawTitle: string,
+  snippet: string
+): { title: string; artist: string } | null {
+  const clean = (s: string) =>
+    s
+      .replace(/\(.*?\)/g, "")
+      .replace(/\[.*?\]/g, "")
+      .replace(/\|.*$/, "")
+      .replace(/lyrics/gi, "")
+      .replace(/official (video|audio|music video)/gi, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const candidates = [rawTitle, snippet, `${rawTitle} ${snippet}`];
+
+  for (const text of candidates) {
+    if (!text) continue;
+    const t = clean(text);
+    if (!t) continue;
+
+    // Pattern: "Artist - Title" or "Artist – Title"
+    let m = t.match(/^(.+?)\s+[-–—]\s+(.+?)$/);
+    if (m && m[1] && m[2] && m[1].length > 1 && m[2].length > 1) {
+      // If the right side looks like a song title (shorter, no "by")
+      if (!m[2].toLowerCase().includes(" by ")) {
+        return { artist: m[1].trim(), title: m[2].trim() };
+      }
+    }
+
+    // Pattern: "Title by Artist"
+    m = t.match(/^(.+?)\s+by\s+(.+?)$/i);
+    if (m && m[1] && m[2] && m[1].length > 1 && m[2].length > 1) {
+      return { title: m[1].trim(), artist: m[2].trim() };
+    }
+
+    // Pattern: "Title Lyrics" (just the title, artist unknown)
+    m = t.match(/^(.+?)\s*lyrics\s*$/i);
+    if (m && m[1] && m[1].length > 2) {
+      // Try to find artist in the other field
+      const otherText = text === rawTitle ? snippet : rawTitle;
+      const artistMatch = otherText.match(/by\s+([A-Z][\w\s&.'-]+)/);
+      return {
+        title: m[1].trim(),
+        artist: artistMatch ? artistMatch[1].trim() : "Unknown artist",
+      };
+    }
+  }
+
+  // Last resort: just use the cleaned title
+  const fallback = clean(rawTitle);
+  if (fallback && fallback.length > 2) {
+    return { title: fallback, artist: "Unknown artist" };
+  }
+  return null;
+}
+
+/**
+ * Parse search results server-side to extract best-guess songs.
+ * Returns ranked candidates.
+ */
+function parseSongsFromSearch(
   results: SearchResultItem[],
   description: string
 ): SongResult | null {
   if (results.length === 0) return null;
 
-  // Common patterns: "Song Title - Artist", "Song Title by Artist", "Artist – Song Title Lyrics"
-  const patterns = [
-    /^(.+?)\s+[-–—]\s+(.+?)(?:\s+lyrics|\s+official|\s+video|\s*\|.*|$)$/i,
-    /^(.+?)\s+by\s+(.+?)(?:\s*\|.*|$)$/i,
-    /^(.+?)\s+[-–—]\s+(.+?)\s+lyrics/i,
-  ];
+  // Prefer music-related results
+  const musicResults = results.filter(isMusicResult);
+  const pool = musicResults.length > 0 ? musicResults : results;
 
-  const candidates: Array<{ title: string; artist: string; source: string }> =
-    [];
+  const candidates: Array<{
+    title: string;
+    artist: string;
+    source: string;
+  }> = [];
 
-  for (const r of results.slice(0, 6)) {
-    const title = (r.name || "").trim();
-    const snippet = (r.snippet || "").trim();
-    for (const pat of patterns) {
-      const m = title.match(pat);
-      if (m && m[1] && m[2]) {
-        // Filter out obvious non-song results (pure domain names, etc.)
-        if (
-          m[1].length > 1 &&
-          m[2].length > 1 &&
-          !m[1].includes(".") &&
-          !m[2].includes(".")
-        ) {
-          candidates.push({
-            title: m[1].trim(),
-            artist: m[2].trim(),
-            source: title,
-          });
-        }
+  for (const r of pool.slice(0, 6)) {
+    const extracted = extractSongFromText(r.name || "", r.snippet || "");
+    if (extracted && extracted.title.length > 1) {
+      // Filter out obvious garbage
+      if (
+        !extracted.title.includes(".") &&
+        !extracted.artist.includes(".") &&
+        extracted.title.length < 80
+      ) {
+        candidates.push({
+          title: extracted.title,
+          artist: extracted.artist,
+          source: r.name || "",
+        });
       }
-    }
-    // Also try the snippet
-    const sm = snippet.match(patterns[0]);
-    if (sm && sm[1] && sm[2] && candidates.length < 3) {
-      candidates.push({
-        title: sm[1].trim(),
-        artist: sm[2].trim(),
-        source: snippet.slice(0, 60),
-      });
     }
   }
 
   if (candidates.length === 0) return null;
 
-  const top = candidates[0];
-  const alternatives = candidates.slice(1, 4).map((c, i) => ({
+  // Deduplicate by title (case-insensitive)
+  const seen = new Set<string>();
+  const unique = candidates.filter((c) => {
+    const key = c.title.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  const top = unique[0];
+  const alternatives = unique.slice(1, 4).map((c, i) => ({
     title: c.title,
     artist: c.artist,
-    confidence: 30 - i * 8,
+    confidence: 35 - i * 8,
   }));
 
   return {
     title: top.title,
     artist: top.artist,
-    confidence: 45,
-    why: `Based on web search results for "${description.slice(0, 60)}", this looks like the closest match. (AI reasoning was unavailable, so confidence is lower — verify via the links.)`,
+    confidence: 50,
+    why: `Based on web search results for "${description.slice(
+      0,
+      50
+    )}", this is the closest match. The AI reasoning service was busy, so verify via the links below.`,
     alternatives,
   };
 }
@@ -124,20 +210,22 @@ const SYSTEM_PROMPT = `You are "Hummingbird", a music identification expert. A u
 
 Inputs you may receive:
 - SPOKEN WORDS: sung lyrics or a description (PRIMARY signal — lean on it heavily).
-- HUMMED MELODY: an approximate contour (direction sequence: up/down/same + coarse step sizes). The user may be a POOR singer — never match by absolute pitch or exact semitones. Match by contour SHAPE only.
+- HUMMED MELODY: an approximate contour (direction sequence: up/down/same). The user may be a POOR singer — never match by absolute pitch. Match by contour SHAPE only.
 - Web search results.
 
-If lyrics are present, they dominate. Return ONLY a JSON object (no markdown):
+If lyrics are present, they dominate. Even a few rough words can identify a song. For melody-only, try to match famous melodies by their contour shape (e.g. "up up up-a-lot same down" = Happy Birthday).
+
+Return ONLY a JSON object (no markdown):
 {"title":string,"artist":string,"year":number|undefined,"confidence":0-100,"why":string,"lyrics_snippet":string|undefined,"alternatives":[{"title":string,"artist":string,"year":number|undefined,"confidence":number}]}
 
-If unsure, lower confidence and add 3-5 alternatives. If truly unknown: {"error":true,"suggestion":"Try singing some lyrics out loud."} Never invent lyrics.`;
+Always return your best guess with alternatives — never return an error unless you truly have zero idea. If unsure, lower confidence and add 3-5 alternatives. Never invent lyrics.`;
 
 async function callLLM(
   zai: Awaited<ReturnType<typeof ZAI.create>>,
   userContent: string
 ): Promise<string> {
   let lastErr: unknown;
-  for (let attempt = 0; attempt < 5; attempt++) {
+  for (let attempt = 0; attempt < 4; attempt++) {
     try {
       const completion = await zai.chat.completions.create({
         messages: [
@@ -149,11 +237,9 @@ async function callLLM(
       if (content) return content;
     } catch (err) {
       lastErr = err;
-      // Exponential backoff: 1s, 2s, 4s, 8s, 16s
       await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt)));
     }
   }
-  console.error("[/api/identify] LLM failed after 5 retries:", lastErr);
   throw lastErr instanceof Error ? lastErr : new Error("LLM unavailable");
 }
 
@@ -197,83 +283,75 @@ export async function POST(req: Request) {
       try {
         let searchQuery: string;
         if (description) {
-          searchQuery = `song lyrics "${description.slice(0, 100)}" artist`;
+          searchQuery = `song lyrics "${description.slice(0, 100)}"`;
         } else {
-          searchQuery = `famous song melody identify`;
+          // For melody-only, search for the contour shape keywords
+          const shapeMatch = melody.match(/shape: ([^.]+)/i);
+          const shape = shapeMatch?.[1] || "melody";
+          searchQuery = `famous song ${shape} melody`;
         }
         const raw = await zai.functions.invoke("web_search", {
           query: searchQuery,
-          num: 6,
+          num: 8,
         });
         if (Array.isArray(raw)) {
           searchResults = raw as SearchResultItem[];
           searchContext = compactSearchResults(raw);
         }
         break;
-      } catch (err) {
-        if (attempt === 0) {
-          await new Promise((r) => setTimeout(r, 1000));
-        }
+      } catch {
+        if (attempt === 0) await new Promise((r) => setTimeout(r, 1000));
       }
     }
 
-    // Step 2: ask the LLM (with 5 retries + exponential backoff).
+    // Step 2: ask the LLM.
     const parts: string[] = [];
     if (description) parts.push(`Spoken words: "${description}"`);
     if (melody) parts.push(`Hummed melody: ${melody}`);
     if (searchContext) parts.push(`Web search results:\n${searchContext}`);
     const userContent = parts.join("\n\n");
 
-    let parsed: SongResult;
     try {
       const content = await callLLM(zai, userContent);
-      parsed = extractJson(content) as SongResult;
+      const parsed = extractJson(content) as SongResult;
+
+      if (parsed && typeof parsed === "object") {
+        // If the LLM returned an error, DON'T pass it through — fall through
+        // to the search-result fallback so the user gets something useful.
+        if (parsed.error !== true) {
+          if (
+            typeof parsed.title === "string" &&
+            typeof parsed.artist === "string"
+          ) {
+            if (typeof parsed.confidence !== "number")
+              parsed.confidence = 50;
+            return NextResponse.json(parsed);
+          }
+        }
+      }
     } catch {
-      // LLM completely failed after all retries — parse search results
-      // server-side as a strong fallback.
-      console.error("[/api/identify] LLM unavailable, parsing search results");
-      const fallback = parseSongFromSearch(searchResults, description);
-      if (fallback) {
-        return NextResponse.json(fallback);
-      }
-      // No search results either — return a graceful error.
-      return NextResponse.json({
-        error: true,
-        suggestion:
-          "The AI service is having trouble right now. Please try again in a moment — sing the lyrics or hum the tune.",
-      });
+      // LLM failed entirely — fall through to search parsing
     }
 
-    // Sanity-check the LLM response shape.
-    if (parsed && typeof parsed === "object") {
-      if (parsed.error === true) {
-        return NextResponse.json(parsed);
-      }
-      if (typeof parsed.title === "string" && typeof parsed.artist === "string") {
-        if (typeof parsed.confidence !== "number") parsed.confidence = 50;
-        return NextResponse.json(parsed);
-      }
-    }
-
-    // LLM returned unparseable JSON — try search fallback before erroring.
-    const fallback = parseSongFromSearch(searchResults, description);
+    // Fallback: parse search results server-side.
+    const fallback = parseSongsFromSearch(searchResults, description);
     if (fallback) return NextResponse.json(fallback);
 
+    // No search results either — graceful error.
     return NextResponse.json({
       error: true,
       suggestion:
-        "Hmm, I couldn't pin that one down. Try singing the lyrics, or mention the genre, decade, or the singer's voice.",
+        "I couldn't find a match. Try singing a few of the lyrics out loud — even rough words help a lot.",
     });
   } catch (err) {
-    console.error("[/api/identify] fatal error:", err);
-    // Last resort: try to parse any search results we got.
-    const fallback = parseSongFromSearch(searchResults, description);
+    console.error("[/api/identify] fatal:", err);
+    const fallback = parseSongsFromSearch(searchResults, description);
     if (fallback) return NextResponse.json(fallback);
     return NextResponse.json(
       {
         error: true,
         suggestion:
-          "The AI service is having trouble right now. Please try again in a moment.",
+          "The service is having trouble right now. Please try again in a moment.",
       },
       { status: 500 }
     );
