@@ -84,18 +84,43 @@ export async function POST(req: Request) {
 
   // --- PRIMARY: AudD audio fingerprinting ---
   if (audioBlob && audioBlob.size > 100) {
+    const auddToken = process.env.AUDD_API_TOKEN;
+    if (!auddToken) {
+      console.error("[/api/identify] AUDD_API_TOKEN not set — cannot do audio recognition");
+      return NextResponse.json({
+        error: true,
+        suggestion:
+          "Audio recognition isn't configured. The owner needs to set AUDD_API_TOKEN (free at audd.io) for humming/singing to work. Without it, the app can only guess from lyrics — which is often wrong.",
+      });
+    }
     try {
       const result = await recognizeAudio(audioBlob);
       if (result) {
         return NextResponse.json(auddToSongResult(result));
       }
+      // No fingerprint match — fall through to lyrics LLM if we have words.
     } catch (err) {
       console.error("[/api/identify] AudD error:", err);
-      // Fall through to LLM fallback
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("not set")) {
+        return NextResponse.json({
+          error: true,
+          suggestion:
+            "Audio recognition isn't configured (AUDD_API_TOKEN missing). Set it for humming to work.",
+        });
+      }
+      if (msg.includes("limit") || msg.includes("exceeded") || msg.includes("requests")) {
+        return NextResponse.json({
+          error: true,
+          suggestion:
+            "AudD free tier limit reached (10/day). Try again tomorrow, or upgrade at audd.io.",
+        });
+      }
+      // Other AudD error — fall through to LLM if we have words.
     }
   }
 
-  // --- FALLBACK: LLM lyrics matching ---
+  // --- FALLBACK: LLM lyrics matching (less reliable — may hallucinate) ---
   if (transcript) {
     try {
       const content = await callHuggingFace([
@@ -107,7 +132,12 @@ export async function POST(req: Request) {
       ]);
       const parsed = extractJson(content) as SongResult;
       if (parsed && typeof parsed === "object" && parsed.title && parsed.artist) {
-        if (typeof parsed.confidence !== "number") parsed.confidence = 50;
+        // Cap confidence — the small LLM hallucinates, so never claim high confidence.
+        if (typeof parsed.confidence !== "number") parsed.confidence = 30;
+        parsed.confidence = Math.min(parsed.confidence, 40);
+        parsed.why = `(Lyrics-only guess — audio recognition unavailable, so this may be wrong.) ${
+          parsed.why || ""
+        }`.trim();
         return NextResponse.json(parsed);
       }
     } catch (err) {
