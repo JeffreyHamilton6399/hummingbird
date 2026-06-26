@@ -394,8 +394,21 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
     return () => cleanupAudio();
   }, [cleanupAudio]);
 
+  const finishRef = React.useRef<() => void>(() => {});
+
   const finish = React.useCallback(() => {
     if (finishedRef.current) return;
+
+    // Minimum recording duration guard: ignore stop calls within 1.2s of
+    // start. This prevents double-taps (touch + click) and accidental instant
+    // stops from producing an empty "didn't catch any sound" error.
+    const elapsed = performance.now() - startTimeRef.current;
+    if (elapsed < 1200) {
+      // Reschedule the stop for when the minimum duration elapses.
+      window.setTimeout(() => finishRef.current(), 1200 - elapsed);
+      return;
+    }
+
     finishedRef.current = true;
 
     cleanupAudio();
@@ -411,7 +424,8 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
 
     const melody = buildMelodyContour(samplesRef.current);
     const finalTranscript = textBufRef.current.trim();
-    const finalHeard = heardRef.current;
+    // "heard" is true if we detected audio OR speech recognition got words.
+    const finalHeard = heardRef.current || finalTranscript.length > 0;
 
     setListening(false);
     setCurrentNote("");
@@ -421,6 +435,10 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
       heard: finalHeard,
     });
   }, [cleanupAudio]);
+
+  React.useEffect(() => {
+    finishRef.current = finish;
+  }, [finish]);
 
   const start = React.useCallback(async () => {
     // Reset state
@@ -454,6 +472,13 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
           }
           textBufRef.current = text;
           setTranscript(text);
+          // If SR is getting words, we definitely "heard" the user — even if
+          // the raw audio stream (getUserMedia) failed. This ensures the
+          // lyrics-only path works without a working mic stream.
+          if (text.trim() && !heardRef.current) {
+            heardRef.current = true;
+            setHeard(true);
+          }
         };
         rec.onerror = (event: SpeechRecognitionErrorEvent) => {
           // no-speech / aborted are expected while humming — not real errors.
