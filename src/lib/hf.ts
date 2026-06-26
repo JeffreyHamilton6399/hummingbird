@@ -13,7 +13,7 @@
 
 const HF_BASE_URL = "https://router.huggingface.co/v1/chat/completions";
 // Llama 3.1 8B Instruct — capable, knows songs/lyrics, on the free tier.
-const MODEL = "meta-llama/Meta-Llama-3.1-8B-Instruct";
+const MODEL = "meta-llama/Llama-3.1-8B-Instruct";
 
 interface ChatMessage {
   role: "system" | "user" | "assistant";
