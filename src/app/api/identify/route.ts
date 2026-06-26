@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { recognizeAudio, type AudDResult } from "@/lib/audd";
 import { callHuggingFace } from "@/lib/hf";
 import type { SongResult } from "@/lib/types";
 
@@ -21,27 +22,48 @@ function extractJson(content: string): unknown {
   return JSON.parse(text);
 }
 
-const SYSTEM_PROMPT = `You are "Hummingbird", a music identification expert. A user hummed, sang, or spoke about a song. You have broad knowledge of songs, lyrics, and melodies from your training data.
+function auddToSongResult(r: AudDResult): SongResult {
+  const year = r.release_date
+    ? parseInt(r.release_date.slice(0, 4), 10)
+    : undefined;
+  return {
+    title: r.title,
+    artist: r.artist,
+    year: isNaN(year as number) ? undefined : year,
+    confidence: 90,
+    why: "Matched by audio fingerprint — this is the song in your recording.",
+    lyrics_snippet: r.lyrics
+      ? r.lyrics.split("\n").slice(0, 2).join(" ").slice(0, 150)
+      : undefined,
+    alternatives: [],
+  } as SongResult;
+}
 
-Inputs you may receive:
-- SPOKEN WORDS: sung lyrics or a description (PRIMARY signal — lean on it heavily).
-- HUMMED MELODY: an approximate contour (direction sequence: up/down/same). The user may be a POOR singer — never match by absolute pitch. Match by contour SHAPE only.
+const SYSTEM_PROMPT = `You are "Hummingbird", a music identification expert. A user sang some lyrics or described a song. Match the lyrics to the song. Even a few rough words can identify a song.
 
-If lyrics are present, they dominate. Even a few rough words can identify a song. For melody-only, try to match famous melodies by their contour shape (e.g. "up up up-a-lot same down" = Happy Birthday, "same same up same same" = Twinkle Twinkle).
-
-Always return your best guess with alternatives — never return an error unless you truly have zero idea. If unsure, lower confidence and add 3-5 alternatives. Never invent lyrics.
+Always return your best guess with alternatives — never return an error unless you truly have zero idea. Never invent lyrics.
 
 Return ONLY a JSON object (no markdown, no prose):
 {"title":string,"artist":string,"year":number|undefined,"confidence":0-100,"why":string,"lyrics_snippet":string|undefined,"alternatives":[{"title":string,"artist":string,"year":number|undefined,"confidence":number}]}`;
 
 export async function POST(req: Request) {
-  let description = "";
-  let melody = "";
+  let audioBlob: Blob | null = null;
+  let transcript = "";
+
   try {
-    const body = await req.json();
-    description =
-      typeof body?.description === "string" ? body.description.trim() : "";
-    melody = typeof body?.melody === "string" ? body.melody.trim() : "";
+    const contentType = req.headers.get("content-type") || "";
+    if (contentType.includes("multipart/form-data")) {
+      const formData = await req.formData();
+      const audioFile = formData.get("audio");
+      if (audioFile instanceof Blob) {
+        audioBlob = audioFile;
+      }
+      transcript = (formData.get("transcript") as string)?.trim() || "";
+    } else {
+      const body = await req.json();
+      transcript =
+        typeof body?.description === "string" ? body.description.trim() : "";
+    }
   } catch {
     return NextResponse.json(
       { error: true, suggestion: "I couldn't read your input. Try again." },
@@ -49,75 +71,54 @@ export async function POST(req: Request) {
     );
   }
 
-  if (!description && !melody) {
+  if (!audioBlob && !transcript) {
     return NextResponse.json(
       {
         error: true,
         suggestion:
-          "I didn't catch any words or melody. Sing the lyrics out loud, or hum the tune clearly — make sure your mic is on.",
+          "I didn't catch any sound. Sing the lyrics or hum the tune — make sure your mic is on.",
       },
       { status: 400 }
     );
   }
 
-  if (description.length > 800) description = description.slice(0, 800);
-  if (melody.length > 800) melody = melody.slice(0, 800);
-
-  const parts: string[] = [];
-  if (description) parts.push(`Spoken words: "${description}"`);
-  if (melody) parts.push(`Hummed melody: ${melody}`);
-  const userContent = parts.join("\n\n");
-
-  try {
-    const content = await callHuggingFace([
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: userContent },
-    ]);
-
-    const parsed = extractJson(content) as SongResult;
-
-    if (parsed && typeof parsed === "object") {
-      if (parsed.error === true) {
-        return NextResponse.json(parsed);
+  // --- PRIMARY: AudD audio fingerprinting ---
+  if (audioBlob && audioBlob.size > 100) {
+    try {
+      const result = await recognizeAudio(audioBlob);
+      if (result) {
+        return NextResponse.json(auddToSongResult(result));
       }
-      if (
-        typeof parsed.title === "string" &&
-        typeof parsed.artist === "string"
-      ) {
+    } catch (err) {
+      console.error("[/api/identify] AudD error:", err);
+      // Fall through to LLM fallback
+    }
+  }
+
+  // --- FALLBACK: LLM lyrics matching ---
+  if (transcript) {
+    try {
+      const content = await callHuggingFace([
+        { role: "system", content: SYSTEM_PROMPT },
+        {
+          role: "user",
+          content: `Spoken words: "${transcript.slice(0, 800)}"`,
+        },
+      ]);
+      const parsed = extractJson(content) as SongResult;
+      if (parsed && typeof parsed === "object" && parsed.title && parsed.artist) {
         if (typeof parsed.confidence !== "number") parsed.confidence = 50;
         return NextResponse.json(parsed);
       }
+    } catch (err) {
+      console.error("[/api/identify] LLM fallback error:", err);
     }
-
-    // JSON parse failed — salvage raw text.
-    return NextResponse.json({
-      title: "Unknown",
-      artist: "Unknown",
-      confidence: 0,
-      why: content.slice(0, 300),
-      alternatives: [],
-    });
-  } catch (err) {
-    console.error("[/api/identify] HuggingFace error:", err);
-    const msg = err instanceof Error ? err.message : String(err);
-    let suggestion =
-      "I couldn't identify that one. Try singing a few of the lyrics out loud — even rough words help a lot.";
-    if (msg.includes("401") || msg.includes("403") || msg.includes("Unauthorized")) {
-      suggestion =
-        "The HUGGINGFACE_API_KEY is invalid. Get a free one at https://huggingface.co/settings/tokens";
-    } else if (msg.includes("429") || msg.includes("rate limit") || msg.includes("quota")) {
-      suggestion =
-        "Free tier rate limit hit. Wait a minute and try again.";
-    } else if (msg.includes("not set")) {
-      suggestion =
-        "HUGGINGFACE_API_KEY isn't set. Get a free one at https://huggingface.co/settings/tokens";
-    } else if (msg.includes("aborted") || msg.includes("timed out")) {
-      suggestion =
-        "The AI took too long to respond. Try again, or sing fewer words.";
-    }
-    return NextResponse.json(
-      { error: true, suggestion },
-      { status: 500 }
-    );
   }
+
+  return NextResponse.json({
+    error: true,
+    suggestion: audioBlob
+      ? "I couldn't find a match for that audio. Try singing the lyrics out loud instead of humming, or hum a more recognizable part of the melody."
+      : "I couldn't identify that one. Try singing a few of the lyrics out loud.",
+  });
 }

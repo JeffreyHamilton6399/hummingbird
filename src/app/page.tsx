@@ -9,7 +9,6 @@ import {
   Lock,
   AudioLines,
   MicOff,
-  Music4,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { HummingbirdLogo } from "@/components/hummingbird-logo";
@@ -18,7 +17,7 @@ import { LoadingDots } from "@/components/loading-dots";
 import { ResultCard } from "@/components/result-card";
 import { SettingsMenu } from "@/components/settings-menu";
 import { TermsGate } from "@/components/terms-gate";
-import { useHummingCapture, type MelodyContour } from "@/lib/audio-capture";
+import { useHummingCapture } from "@/lib/audio-capture";
 import type { SongResult } from "@/lib/types";
 
 type AppState = "idle" | "listening" | "thinking" | "result" | "error";
@@ -31,22 +30,20 @@ export default function Home() {
 
   const identify = React.useCallback(
     async (
+      audioBlob: Blob | null,
       transcript: string,
-      melody: MelodyContour | null,
       heard: boolean
     ) => {
       const words = transcript.trim();
-      const melodyDesc = melody?.description ?? "";
 
-      if (!words && !melodyDesc) {
-        // Distinguish "silent / mic off" from "heard you but couldn't track".
+      if (!audioBlob && !words) {
         if (heard) {
           setErrorMsg(
-            "I could hear you, but didn't catch any words or melody. Singing even a few of the lyrics out loud works best — you don't need to be on key. Otherwise, hum a steady tune clearly."
+            "I could hear you, but didn't catch enough audio. Sing the lyrics or hum the tune a bit louder, closer to the mic."
           );
         } else {
           setErrorMsg(
-            "I didn't catch any sound. Make sure your mic is on and allowed, then sing some lyrics or hum the tune."
+            "I didn't catch any sound. Make sure your mic is on and allowed, then sing the lyrics or hum the tune."
           );
         }
         setState("error");
@@ -54,37 +51,30 @@ export default function Home() {
       }
 
       // Build a short label for the thinking state.
-      if (words && melodyDesc) {
-        setSubmittedLabel(
-          `“${words.length > 80 ? words.slice(0, 80) + "…" : words}” + hummed melody`
-        );
-      } else if (words) {
-        setSubmittedLabel(
-          `“${words.length > 100 ? words.slice(0, 100) + "…" : words}”`
-        );
-      } else {
-        setSubmittedLabel(`Hummed melody: ${melody?.shape ?? "melody"}`);
-      }
+      setSubmittedLabel(
+        words
+          ? `“${words.length > 100 ? words.slice(0, 100) + "…" : words}”`
+          : "Listening to your recording…"
+      );
 
       setState("thinking");
       setResult(null);
       setErrorMsg("");
 
       try {
-        const body: Record<string, string> = {};
-        if (words) body.description = words;
-        if (melodyDesc) body.melody = melodyDesc;
+        const formData = new FormData();
+        if (audioBlob) formData.append("audio", audioBlob, "recording.webm");
+        if (words) formData.append("transcript", words);
 
         const res = await fetch("/api/identify", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
+          body: formData,
         });
         const data = (await res.json()) as SongResult;
         if (data.error) {
           setErrorMsg(
             data.suggestion ||
-              "Try singing the lyrics, or mention the genre, decade, or the singer's voice."
+              "Try singing the lyrics, or hum a more recognizable part of the melody."
           );
           setState("error");
           return;
@@ -101,11 +91,11 @@ export default function Home() {
 
   const handleCaptureEnd = React.useCallback(
     (captured: {
+      audioBlob: Blob | null;
       transcript: string;
-      melody: MelodyContour | null;
       heard: boolean;
     }) => {
-      identify(captured.transcript, captured.melody, captured.heard);
+      identify(captured.audioBlob, captured.transcript, captured.heard);
     },
     [identify]
   );
@@ -124,9 +114,7 @@ export default function Home() {
     listening,
     transcript,
     level,
-    hasMelody,
     heard,
-    currentNote,
     start,
     stop,
   } = useHummingCapture({
@@ -189,9 +177,7 @@ export default function Home() {
             <ListeningState
               transcript={transcript}
               level={level}
-              hasMelody={hasMelody}
               heard={heard}
-              currentNote={currentNote}
               onStop={toggleMic}
             />
           )}
@@ -271,16 +257,12 @@ function IdleState({
 function ListeningState({
   transcript,
   level,
-  hasMelody,
   heard,
-  currentNote,
   onStop,
 }: {
   transcript: string;
   level: number;
-  hasMelody: boolean;
   heard: boolean;
-  currentNote: string;
   onStop: () => void;
 }) {
   // Bars react to live input level; CSS animation adds liveliness on top.
@@ -309,23 +291,14 @@ function ListeningState({
         })}
       </div>
 
-      {/* Live pitch indicator */}
+      {/* Status indicator */}
       <div className="flex items-center gap-2 text-xs h-5">
-        {currentNote ? (
-          <span className="flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-emerald-600 dark:text-emerald-400 font-medium">
-            <Music4 className="size-3" /> {currentNote}
-          </span>
-        ) : heard ? (
-          <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
-            <AudioLines className="size-3" /> I can hear you — hum a steady note
+        {heard ? (
+          <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400 font-medium">
+            <AudioLines className="size-3" /> Recording — tap to identify
           </span>
         ) : (
           <span className="text-muted-foreground/60">waiting for sound…</span>
-        )}
-        {hasMelody && (
-          <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400 font-medium">
-            ✓ melody tracked
-          </span>
         )}
         {transcript && (
           <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
