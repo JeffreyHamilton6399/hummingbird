@@ -28,7 +28,6 @@ export default function Home() {
   const [result, setResult] = React.useState<SongResult | null>(null);
   const [errorMsg, setErrorMsg] = React.useState("");
   const [submittedLabel, setSubmittedLabel] = React.useState("");
-  const [text, setText] = React.useState("");
 
   const identify = React.useCallback(
     async (
@@ -43,11 +42,11 @@ export default function Home() {
         // Distinguish "silent / mic off" from "heard you but couldn't track".
         if (heard) {
           setErrorMsg(
-            "I could hear you, but couldn't track the melody clearly. Try humming a bit louder, closer to the mic, and hold each note briefly — or sing the lyrics instead."
+            "I could hear you, but didn't catch any words or melody. Singing even a few of the lyrics out loud works best — you don't need to be on key. Otherwise, hum a steady tune clearly."
           );
         } else {
           setErrorMsg(
-            "I didn't catch any sound. Make sure your mic is on and you're in a quiet spot, then sing the lyrics or hum the tune."
+            "I didn't catch any sound. Make sure your mic is on and allowed, then sing some lyrics or hum the tune."
           );
         }
         setState("error");
@@ -149,20 +148,7 @@ export default function Home() {
     setResult(null);
     setErrorMsg("");
     setSubmittedLabel("");
-    setText("");
   }, []);
-
-  const submitText = React.useCallback(
-    (e: React.FormEvent) => {
-      e.preventDefault();
-      const t = text.trim();
-      if (!t) return;
-      // Text path: no melody, but treat as "heard" so we don't show the
-      // silent-mic error.
-      identify(t, null, true);
-    },
-    [text, identify]
-  );
 
   return (
     <div className="h-dvh flex flex-col overflow-hidden bg-background text-foreground">
@@ -196,13 +182,7 @@ export default function Home() {
       <main className="flex-1 min-h-0 overflow-y-auto hum-scroll">
         <div className="mx-auto w-full max-w-xl px-4 py-6 min-h-full flex flex-col items-center justify-center">
           {state === "idle" && (
-            <IdleState
-              micSupported={supported}
-              onToggleMic={toggleMic}
-              text={text}
-              setText={setText}
-              onSubmitText={submitText}
-            />
+            <IdleState micSupported={supported} onToggleMic={toggleMic} />
           )}
 
           {state === "listening" && (
@@ -259,7 +239,10 @@ function IdleState({
         <>
           <MicButton listening={false} onToggle={onToggleMic} />
           <p className="text-xs text-muted-foreground -mt-2 text-center">
-            Tap to hum the tune or sing the lyrics
+            Tap to <span className="font-medium text-foreground/80">sing the lyrics</span> or hum the tune
+          </p>
+          <p className="text-[11px] text-muted-foreground/60 max-w-xs text-center -mt-1">
+            Singing even a few words works best — you don&apos;t need to be on key.
           </p>
         </>
       ) : (
@@ -357,7 +340,7 @@ function ListeningState({
           <p className="text-sm leading-relaxed">{transcript}</p>
         ) : (
           <p className="text-sm text-muted-foreground italic">
-            Sing the lyrics, or hum the tune…
+            Sing a few of the lyrics out loud — even rough words help a lot…
           </p>
         )}
       </div>
