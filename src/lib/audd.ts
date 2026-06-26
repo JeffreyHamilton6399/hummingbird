@@ -46,7 +46,8 @@ export async function recognizeAudio(
   try {
     const formData = new FormData();
     formData.append("api_token", apiToken);
-    formData.append("audio", audioBlob, "recording.webm");
+    // CRITICAL: AudD expects the field name "file", NOT "audio".
+    formData.append("file", audioBlob, "recording.webm");
     formData.append("return", "apple_music,spotify,lyrics");
 
     const res = await fetch(AUDD_URL, {
