@@ -334,7 +334,7 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
   const sourceRef = React.useRef<MediaStreamAudioSourceNode | null>(null);
   const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
   const samplesRef = React.useRef<PitchSample[]>([]);
-  const transcriptRef = React.useRef("");
+  const textBufRef = React.useRef("");
   const heardRef = React.useRef(false);
   const lastFreqRef = React.useRef(-1);
   const startTimeRef = React.useRef(0);
@@ -410,7 +410,7 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
     }
 
     const melody = buildMelodyContour(samplesRef.current);
-    const finalTranscript = transcriptRef.current.trim();
+    const finalTranscript = textBufRef.current.trim();
     const finalHeard = heardRef.current;
 
     setListening(false);
@@ -424,7 +424,7 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
 
   const start = React.useCallback(async () => {
     // Reset state
-    transcriptRef.current = "";
+    textBufRef.current = "";
     samplesRef.current = [];
     heardRef.current = false;
     lastFreqRef.current = -1;
@@ -452,7 +452,7 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
           for (let i = 0; i < event.results.length; i++) {
             text += event.results[i][0].transcript;
           }
-          transcriptRef.current = text;
+          textBufRef.current = text;
           setTranscript(text);
         };
         rec.onerror = (event: SpeechRecognitionErrorEvent) => {
@@ -595,7 +595,7 @@ export function useHummingCapture(options: UseHummingCaptureOptions = {}) {
   }, [finish]);
 
   const reset = React.useCallback(() => {
-    transcriptRef.current = "";
+    textBufRef.current = "";
     samplesRef.current = [];
     heardRef.current = false;
     lastFreqRef.current = -1;
