@@ -102,3 +102,27 @@ Verification:
 Stage Summary:
 - Humming now works: the app extracts the melody's pitch contour from the mic, describes it as relative intervals, and the LLM matches it to famous melodies. Singing lyrics still works via ASR. Both signals combine when present.
 - Code is on GitHub (https://github.com/JeffreyHamilton6399/hummingbird), ready for Vercel deploy with ZAI_API_KEY.
+
+---
+Task ID: 4
+Agent: main (orchestrator)
+Task: Fix "humming still doesn't work" — make melody pitch detection actually register real human humming.
+
+Work Log:
+- Diagnosed root cause: the previous detector used (a) a clarity threshold of 0.9 (real humming scores 0.4–0.7 → most samples rejected), (b) a sum-based ACF normalized by zero-lag energy over a different sample count (unstable), and (c) global-max peak picking (octave-down errors). Combined with RMS gate 0.008, almost nothing passed → empty melody → the "didn't catch any words or melody" error.
+- Rewrote detectPitch() in src/lib/audio-capture.ts:
+  • Average (not sum) autocorrelation → acf[0] is average energy; clarity = bestVal/acf[0] is a true [0,1] normalized value.
+  • First-peak-after-descent: find first local minimum after lag 0, then search for the highest peak after it within the vocal range. Avoids picking the lag-0 peak or subharmonics.
+  • Parabolic interpolation around the peak → sub-sample lag precision.
+  • Lowered thresholds: CLARITY 0.9→0.45, RMS 0.008→0.0025. Wider freq range 75–500 → 65–600 Hz.
+- Added a persistence filter in the capture loop: only accept a pitch within ~2.2 semitones of the last accepted sample (or the first). Filters transient noise that now crosses the lowered threshold.
+- Faster polling (40ms→30ms); buildMelodyContour now accepts 2+ notes (was 3) so short melodies still produce a contour.
+- Added a `heard` flag (true when RMS crosses the silence gate even without a pitch lock) → passed through onEnd to the page. Error messaging now distinguishes:
+  • heard=true, no words/melody → "I could hear you, but couldn't track the melody clearly. Try humming a bit louder, closer to the mic, and hold each note briefly — or sing the lyrics instead."
+  • heard=false → "I didn't catch any sound. Make sure your mic is on…"
+- Live UI: "I can hear you — keep going" amber indicator appears when heard && !transcript && !hasMelody, replacing the generic "waiting for sound…".
+- Lint clean. Page renders with no console/server errors. Melody-only API verified still working.
+
+Stage Summary:
+- Pushed commit 7ce16ba to GitHub (https://github.com/JeffreyHamilton6399/hummingbird). Remote HEAD verified.
+- Detection is now tuned for real human humming (permissive thresholds + robust normalized ACF + persistence). If it still can't track, the error now tells the user specifically whether the mic heard anything at all, with concrete remediation.
