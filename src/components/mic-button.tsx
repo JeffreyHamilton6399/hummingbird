@@ -7,34 +7,20 @@ import { cn } from "@/lib/utils";
 interface MicButtonProps {
   listening: boolean;
   disabled?: boolean;
-  onStart: () => void;
-  onStop: () => void;
+  onToggle: () => void;
   className?: string;
 }
 
 /**
- * Big tactile mic button. Hold-to-record (pointer down/up) with tap support.
+ * Big tactile mic button. Tap to start, tap again to stop.
  * Emerald when idle, red + pulsing when listening.
  */
 export function MicButton({
   listening,
   disabled,
-  onStart,
-  onStop,
+  onToggle,
   className,
 }: MicButtonProps) {
-  const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
-    e.preventDefault();
-    if (disabled || listening) return;
-    onStart();
-  };
-
-  const handlePointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
-    e.preventDefault();
-    if (!listening) return;
-    onStop();
-  };
-
   return (
     <div className={cn("relative flex items-center justify-center", className)}>
       {/* Pulse rings while listening */}
@@ -53,13 +39,12 @@ export function MicButton({
       )}
       <button
         type="button"
-        aria-label={listening ? "Stop recording" : "Hold to hum, sing, or describe"}
+        aria-label={
+          listening ? "Stop recording" : "Tap to hum, sing, or say the lyrics"
+        }
         aria-pressed={listening}
         disabled={disabled}
-        onPointerDown={handlePointerDown}
-        onPointerUp={handlePointerUp}
-        onPointerLeave={handlePointerUp}
-        onPointerCancel={handlePointerUp}
+        onClick={onToggle}
         className={cn(
           "relative size-20 rounded-full flex items-center justify-center text-white shadow-lg transition-transform select-none touch-none",
           "focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-500/30",
