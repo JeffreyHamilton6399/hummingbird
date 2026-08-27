@@ -1,69 +1,68 @@
 # Hummingbird
 
-**What's that song?** Hum, sing, or describe a song you half-remember and Hummingbird tries to identify it. Like Shazam for your memory.
-
-No sign-up. No accounts. No tracking. Just the song.
+Hum, sing, or describe a song you half-remember and Hummingbird tries to name it.
+No sign-up, no accounts, no tracking.
 
 ## How it works
 
-```
-Browser (mic / text input)
-        │  only TEXT is sent (audio stays local)
-        ▼
-POST /api/identify  ──►  z-ai-web-dev-sdk
-        │                     │
-        │                     ├─ web_search  (ground the answer in real results)
-        │                     └─ chat.completions  (reason + identify)
-        ▼
-JSON { title, artist, year, confidence, why, lyrics_snippet, alternatives[] }
-```
+The browser records a short clip and, where the Web Speech API is available,
+transcribes it locally as well. Both are posted to `/api/identify`, which tries
+two things in order:
 
-1. **Voice (optional):** the mic is transcribed **in your browser** with the Web Speech API (`SpeechRecognition`). The audio never leaves the device — only the transcribed text is sent to the server.
-2. **Text:** you can always type the description instead.
-3. **Server:** the `/api/identify` route runs a web search for the description, then asks an LLM to identify the song and returns a structured JSON result.
-4. **Result:** title + artist, a confidence level, why it matches (quoting your words), a lyrics snippet, and search links for YouTube / Spotify / Apple Music. If unsure, it returns 3–5 ranked guesses.
+1. **Audio fingerprinting (AudD).** The recording is matched against a
+   commercial song database. When this hits, the answer is exact — title,
+   artist, album, and streaming links come straight from the match.
+2. **Lyric guessing (Hugging Face).** If the fingerprint misses, or no AudD
+   token is configured, the transcript is handed to Llama 3.1 8B, which returns
+   a ranked list of candidates. These are guesses and the UI labels them as
+   such.
 
-## Tech stack
+The response is a `SongResult`: title, artist, year, a confidence level, why it
+matched, a lyrics snippet, and up to five alternatives.
 
-- **Next.js 16** (App Router) + **TypeScript**
-- **Tailwind CSS 4** + **shadcn/ui** (New York style)
-- **z-ai-web-dev-sdk** (backend only) for web search + LLM chat completions
-- **Web Speech API** (`SpeechRecognition`) for in-browser voice-to-text
-- **next-themes** for dark mode
-- **bun** as package manager
+## What leaves your device
 
-## Design notes
+Your recording is uploaded and forwarded to AudD for matching — fingerprinting
+cannot happen in the browser. If AudD misses, the transcribed text is sent to
+Hugging Face. Neither the audio nor the text is stored by this app; there is no
+database. `localStorage` holds only your theme preference and whether you have
+dismissed the intro dialog.
 
-- Single screen, mobile-first (works at 390px), no page scroll — header (h-12) / main (flex-1, internally scrollable) / footer (h-8).
-- Flat design: no gradients, no decorative blobs, no spinners (animated dots / pulse only).
-- Emerald = mic & strong match, amber = possible match, rose = donate / error accents.
-- Custom flat SVG hummingbird logo + favicon.
-
-## Privacy
-
-- **Audio stays local.** The mic is transcribed in the browser; the server never receives or stores audio.
-- **Your text description is sent to the AI** (web search + LLM) to identify the song. It is not stored.
-- **No accounts, no tracking, no analytics.** `localStorage` is used only for the theme and to remember you accepted the "how it works" dialog.
-
-## Local development
+## Running locally
 
 ```bash
 bun install
-bun run dev      # http://localhost:3000
-bun run lint
+cp .env.example .env
+bun run dev
 ```
 
-Set `ZAI_API_KEY` in your environment (or `.env`).
+Both keys have free tiers and neither needs a credit card:
 
-## Deploy to Vercel
+| Variable | Used for | Get one at |
+| --- | --- | --- |
+| `AUDD_API_TOKEN` | audio fingerprint matching | https://dashboard.audd.io/ |
+| `HUGGINGFACE_API_KEY` | lyric-based fallback guesses | https://huggingface.co/settings/tokens |
 
-1. Push this repo to GitHub.
-2. Import it into Vercel.
-3. Add the `ZAI_API_KEY` environment variable in the Vercel project settings.
-4. Deploy. (Build command: `next build`.)
+Without `AUDD_API_TOKEN` the app still runs, but it can only make lyric-based
+guesses.
 
-> Voice input (Web Speech API) works in Chrome, Edge, and Safari. If it's unavailable, the text input is the primary interface.
+## Stack
 
-## Author
+Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS v4 with shadcn/ui,
+and `next-themes` for dark mode. No database.
 
-Jeffrey Hamilton · [GitHub](https://github.com/JeffreyHamilton6399) · [Donate](https://buymeacoffee.com/jeffreyscof)
+## Deploying
+
+Import the repo into Vercel and set both environment variables in the project
+settings. The build command is the default `next build`.
+
+## Browser support
+
+Voice capture uses `MediaRecorder`, which is available everywhere current. The
+local transcript uses the Web Speech API, which is Chrome, Edge, and Safari
+only; without it, fingerprinting still works and the text box remains as a
+fallback.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
